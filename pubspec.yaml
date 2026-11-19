@@ -5,3 +5,4 @@ environment:
 workspace:
   - packages/dart_geoquery
   - packages/dart_geoquery_flutter
+  - packages/dart_geoquery_flutter/example

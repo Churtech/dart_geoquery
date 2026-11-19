@@ -7,6 +7,7 @@ import 'package:vector_tile/vector_tile.dart';
 
 import '../cache/lru_cache.dart';
 import '../spatial/point_in_polygon.dart';
+import '../spatial/polygon_clipping.dart';
 import '../spatial/tile_math.dart';
 import 'query_message.dart';
 
@@ -45,6 +46,7 @@ class _CachedFeature {
   final Geometry geometry;
   final List<double> bbox; // [minX, minY, maxX, maxY]
   final bool touchesBoundary;
+  final List<(int dx, int dy)> candidateNeighborOffsets;
   final List<List<(double lat, double lon)>> projectedRings;
 
   _CachedFeature({
@@ -54,6 +56,7 @@ class _CachedFeature {
     required this.geometry,
     required this.bbox,
     required this.touchesBoundary,
+    required this.candidateNeighborOffsets,
     required this.projectedRings,
   });
 }
@@ -240,14 +243,21 @@ class IsolateQueryWorker {
         final id = feat.id != Int64.ZERO ? feat.id.toInt() : null;
 
         final extent = vLayer.extent;
-        // Check if geometry touches tile boundaries (x <= 0 or >= extent, y <= 0 or >= extent)
-        final touches = bbox[0] <= 0 ||
-            bbox[2] >= extent ||
-            bbox[1] <= 0 ||
-            bbox[3] >= extent;
+        final touchLeft = bbox[0] <= 0.0;
+        final touchRight = bbox[2] >= extent.toDouble();
+        final touchTop = bbox[1] <= 0.0;
+        final touchBottom = bbox[3] >= extent.toDouble();
+        final touches = touchLeft || touchRight || touchTop || touchBottom;
 
-        // Project rings to LatLng, clipping to [0, extent] to avoid buffer overlap
-        final projectedRings = _projectRings(
+        final candidateOffsets = _computeNeighborOffsets(
+          touchLeft: touchLeft,
+          touchRight: touchRight,
+          touchTop: touchTop,
+          touchBottom: touchBottom,
+        );
+
+        // Sutherland-Hodgman clipping against [0, extent] before WGS84 projection
+        final projectedRings = _projectClippedRings(
           geom,
           tileX,
           tileY,
@@ -262,6 +272,7 @@ class IsolateQueryWorker {
           geometry: geom,
           bbox: bbox,
           touchesBoundary: touches,
+          candidateNeighborOffsets: candidateOffsets,
           projectedRings: projectedRings,
         ));
       }
@@ -282,6 +293,26 @@ class IsolateQueryWorker {
     );
     cache.put(tileId, cached);
     return cached;
+  }
+
+  static List<(int dx, int dy)> _computeNeighborOffsets({
+    required bool touchLeft,
+    required bool touchRight,
+    required bool touchTop,
+    required bool touchBottom,
+  }) {
+    final offsets = <(int dx, int dy)>[];
+    if (touchLeft) offsets.add((-1, 0));
+    if (touchRight) offsets.add((1, 0));
+    if (touchTop) offsets.add((0, -1));
+    if (touchBottom) offsets.add((0, 1));
+
+    if (touchLeft && touchTop) offsets.add((-1, -1));
+    if (touchLeft && touchBottom) offsets.add((-1, 1));
+    if (touchRight && touchTop) offsets.add((1, -1));
+    if (touchRight && touchBottom) offsets.add((1, 1));
+
+    return offsets;
   }
 
   static List<GeoFeatureDto> _handlePointQuery(
@@ -307,13 +338,11 @@ class IsolateQueryWorker {
       if (req.layer != null && layer.name != req.layer) continue;
 
       for (final feat in layer.polygonFeatures) {
-        // Fast bounding box rejection O(1)
         final bbox = feat.bbox;
         if (px < bbox[0] || px > bbox[2] || py < bbox[1] || py > bbox[3]) {
           continue;
         }
 
-        // Exact Point-in-polygon ray casting
         final isInside = _testGeometryContains(feat.geometry, px, py);
         if (isInside) {
           matches.add(GeoFeatureDto(
@@ -323,6 +352,7 @@ class IsolateQueryWorker {
             geometryType: feat.geometryType,
             coordinates: feat.projectedRings,
             touchesTileBoundary: feat.touchesBoundary,
+            candidateNeighborOffsets: feat.candidateNeighborOffsets,
             sourceTile: (cached.tileX, cached.tileY, cached.zoom),
           ));
         }
@@ -364,6 +394,7 @@ class IsolateQueryWorker {
             geometryType: feat.geometryType,
             coordinates: feat.projectedRings,
             touchesTileBoundary: feat.touchesBoundary,
+            candidateNeighborOffsets: feat.candidateNeighborOffsets,
             sourceTile: (cached.tileX, cached.tileY, cached.zoom),
           ));
         }
@@ -373,7 +404,7 @@ class IsolateQueryWorker {
     return matches;
   }
 
-  static List<List<(double lat, double lon)>> _projectRings(
+  static List<List<(double lat, double lon)>> _projectClippedRings(
     Geometry geom,
     int tileX,
     int tileY,
@@ -382,24 +413,33 @@ class IsolateQueryWorker {
   ) {
     final rings = <List<(double lat, double lon)>>[];
 
-    void processRing(List<List<double>> ring) {
-      final projected = <(double lat, double lon)>[];
-      for (final pt in ring) {
-        // Clip coordinates strictly to [0, extent] to eliminate buffer overlap
-        final cx = pt[0].clamp(0.0, extent.toDouble());
-        final cy = pt[1].clamp(0.0, extent.toDouble());
+    void processRing(List<List<double>> rawRing) {
+      // 1. Sutherland-Hodgman clipping against exact tile boundary
+      final clipped = PolygonClipping.clipRingToBox(
+        rawRing,
+        minX: 0.0,
+        minY: 0.0,
+        maxX: extent.toDouble(),
+        maxY: extent.toDouble(),
+      );
 
+      if (clipped.length < 3) return;
+
+      // 2. Project clipped vertices to WGS84 LatLng
+      final projected = <(double lat, double lon)>[];
+      for (final pt in clipped) {
         final latLng = TileMath.tileCoordinatesToLatLng(
           tileX: tileX,
           tileY: tileY,
           zoom: zoom,
-          localX: cx,
-          localY: cy,
+          localX: pt[0],
+          localY: pt[1],
           extent: extent,
         );
         projected.add((latLng.latitude, latLng.longitude));
       }
-      if (projected.isNotEmpty) {
+
+      if (projected.length >= 3) {
         rings.add(projected);
       }
     }

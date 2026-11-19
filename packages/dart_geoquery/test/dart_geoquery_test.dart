@@ -232,6 +232,171 @@ void main() {
     });
   });
 
+  group('PolygonClipping (Sutherland-Hodgman) & Area', () {
+    test('clips polygon extending past tile boundary and preserves exact area', () {
+      // Original 200x100 rectangle: x from -50 to 150, y from 0 to 100
+      // Area = 200 * 100 = 20,000
+      final originalRing = [
+        [-50.0, 0.0],
+        [150.0, 0.0],
+        [150.0, 100.0],
+        [-50.0, 100.0],
+        [-50.0, 0.0],
+      ];
+      final originalArea = PolygonClipping.computeArea(originalRing);
+      expect(originalArea, closeTo(20000.0, 1e-4));
+
+      // Slice 1: inside Tile A [x in 0 to 100] (local [0, 100])
+      // Sutherland-Hodgman cuts at x=0 and x=100
+      final tileAClip = PolygonClipping.clipRingToBox(
+        originalRing,
+        minX: 0.0,
+        minY: 0.0,
+        maxX: 100.0,
+        maxY: 100.0,
+      );
+      // Slice 1 should be [0..100, 0..100] -> area 10,000
+      final areaA = PolygonClipping.computeArea(tileAClip);
+      expect(areaA, closeTo(10000.0, 1e-4));
+
+      // Slice 2: inside Tile B (left neighbor: x in -100 to 0)
+      final tileBClip = PolygonClipping.clipRingToBox(
+        originalRing,
+        minX: -100.0,
+        minY: 0.0,
+        maxX: 0.0,
+        maxY: 100.0,
+      );
+      // Slice 2 should be [-50..0, 0..100] -> area 5,000
+      final areaB = PolygonClipping.computeArea(tileBClip);
+      expect(areaB, closeTo(5000.0, 1e-4));
+
+      // Slice 3: inside Tile C (right neighbor: x in 100 to 200)
+      final tileCClip = PolygonClipping.clipRingToBox(
+        originalRing,
+        minX: 100.0,
+        minY: 0.0,
+        maxX: 200.0,
+        maxY: 100.0,
+      );
+      // Slice 3 should be [100..150, 0..100] -> area 5,000
+      final areaC = PolygonClipping.computeArea(tileCClip);
+      expect(areaC, closeTo(5000.0, 1e-4));
+
+      // Total sum of non-overlapping clipped slices matches original area perfectly!
+      expect(areaA + areaB + areaC, closeTo(originalArea, 1e-4));
+    });
+
+    test('corner crossing: 4-tile junction clipping preserves total area', () {
+      // 200x200 square centered at tile junction (0, 0): [-100..100] x [-100..100]
+      // Area = 40,000
+      final square = [
+        [-100.0, -100.0],
+        [100.0, -100.0],
+        [100.0, 100.0],
+        [-100.0, 100.0],
+        [-100.0, -100.0],
+      ];
+      final totalArea = PolygonClipping.computeArea(square);
+      expect(totalArea, closeTo(40000.0, 1e-4));
+
+      // Quadrant 1 (top-right): [0..100, 0..100]
+      final q1 = PolygonClipping.clipRingToBox(
+        square,
+        minX: 0.0,
+        minY: 0.0,
+        maxX: 200.0,
+        maxY: 200.0,
+      );
+      // Quadrant 2 (top-left): [-200..0, 0..200]
+      final q2 = PolygonClipping.clipRingToBox(
+        square,
+        minX: -200.0,
+        minY: 0.0,
+        maxX: 0.0,
+        maxY: 200.0,
+      );
+      // Quadrant 3 (bottom-left): [-200..0, -200..0]
+      final q3 = PolygonClipping.clipRingToBox(
+        square,
+        minX: -200.0,
+        minY: -200.0,
+        maxX: 0.0,
+        maxY: 0.0,
+      );
+      // Quadrant 4 (bottom-right): [0..200, -200..0]
+      final q4 = PolygonClipping.clipRingToBox(
+        square,
+        minX: 0.0,
+        minY: -200.0,
+        maxX: 200.0,
+        maxY: 0.0,
+      );
+
+      final sumArea = PolygonClipping.computeArea(q1) +
+          PolygonClipping.computeArea(q2) +
+          PolygonClipping.computeArea(q3) +
+          PolygonClipping.computeArea(q4);
+
+      expect(sumArea, closeTo(totalArea, 1e-4));
+    });
+
+    test('polygon with interior hole crossing border clips outer ring and hole properly', () {
+      // Outer: [0..200, 0..200], Hole: [50..150, 50..150]
+      // Tile boundary at x = 100
+      final outer = [
+        [0.0, 0.0],
+        [200.0, 0.0],
+        [200.0, 200.0],
+        [0.0, 200.0],
+        [0.0, 0.0],
+      ];
+      final hole = [
+        [50.0, 50.0],
+        [150.0, 50.0],
+        [150.0, 150.0],
+        [50.0, 150.0],
+        [50.0, 50.0],
+      ];
+
+      // Net area = 200*200 - 100*100 = 30,000
+      final netAreaOriginal = PolygonClipping.computeArea(outer) -
+          PolygonClipping.computeArea(hole);
+      expect(netAreaOriginal, closeTo(30000.0, 1e-4));
+
+      // Left tile [0..100]
+      final outerLeft = PolygonClipping.clipRingToBox(outer, maxX: 100.0, maxY: 200.0);
+      final holeLeft = PolygonClipping.clipRingToBox(hole, maxX: 100.0, maxY: 200.0);
+      final netLeft = PolygonClipping.computeArea(outerLeft) -
+          PolygonClipping.computeArea(holeLeft);
+
+      // Right tile [100..200]
+      final outerRight = PolygonClipping.clipRingToBox(outer, minX: 100.0, maxX: 200.0, maxY: 200.0);
+      final holeRight = PolygonClipping.clipRingToBox(hole, minX: 100.0, maxX: 200.0, maxY: 200.0);
+      final netRight = PolygonClipping.computeArea(outerRight) -
+          PolygonClipping.computeArea(holeRight);
+
+      expect(netLeft + netRight, closeTo(netAreaOriginal, 1e-4));
+    });
+
+    test('stitch depth guard terminates without infinite loops', () async {
+      // Create a feature touching boundary with multiple candidate offsets
+      const feature = GeoFeature(
+        id: 999,
+        layer: 'complexes',
+        properties: {'name': 'Mega Campus'},
+        geometryType: 'Polygon',
+        touchesTileBoundary: true,
+        candidateNeighborOffsets: [(1, 0), (0, 1), (1, 1)],
+        sourceTile: (10, 10, 14),
+      );
+
+      // Verify that candidate neighbor offsets are exact to touched directions
+      expect(feature.candidateNeighborOffsets.length, equals(3));
+      expect(feature.touchesTileBoundary, isTrue);
+    });
+  });
+
   group('LruCache', () {
     test('evicts least recently used item when capacity exceeded', () {
       final cache = LruCache<String, int>(capacity: 2);

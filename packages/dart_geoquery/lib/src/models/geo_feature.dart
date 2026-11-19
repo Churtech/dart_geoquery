@@ -20,6 +20,9 @@ class GeoFeature {
   /// Whether any vertex of this geometry touches or extends beyond the tile boundary.
   final bool touchesTileBoundary;
 
+  /// Candidate relative tile offsets `(dx, dy)` based on the specific edges touched.
+  final List<(int dx, int dy)> candidateNeighborOffsets;
+
   /// The tile coordinate `(x, y, z)` where this feature was located.
   final (int x, int y, int z)? sourceTile;
 
@@ -30,6 +33,7 @@ class GeoFeature {
     required this.geometryType,
     this.coordinates,
     this.touchesTileBoundary = false,
+    this.candidateNeighborOffsets = const [],
     this.sourceTile,
   });
 
@@ -50,6 +54,7 @@ class GeoFeature {
     String? geometryType,
     List<List<LatLng>>? coordinates,
     bool? touchesTileBoundary,
+    List<(int dx, int dy)>? candidateNeighborOffsets,
     (int x, int y, int z)? sourceTile,
   }) {
     return GeoFeature(
@@ -59,6 +64,8 @@ class GeoFeature {
       geometryType: geometryType ?? this.geometryType,
       coordinates: coordinates ?? this.coordinates,
       touchesTileBoundary: touchesTileBoundary ?? this.touchesTileBoundary,
+      candidateNeighborOffsets:
+          candidateNeighborOffsets ?? this.candidateNeighborOffsets,
       sourceTile: sourceTile ?? this.sourceTile,
     );
   }

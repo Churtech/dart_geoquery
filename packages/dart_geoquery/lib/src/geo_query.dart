@@ -202,6 +202,7 @@ class GeoQuery {
           geometryType: d.geometryType,
           coordinates: rings,
           touchesTileBoundary: d.touchesTileBoundary,
+          candidateNeighborOffsets: d.candidateNeighborOffsets,
           sourceTile: d.sourceTile,
         );
       }).toList();
@@ -249,8 +250,8 @@ class GeoQuery {
     return matchingFeatures;
   }
 
-  /// Stitches geometries across tile borders by querying up to 8 neighboring tiles
-  /// (including diagonals) matching the same [idKey].
+  /// Stitches geometries across tile borders by querying only the candidate
+  /// neighboring tiles matching the touched edge directions and sharing [idKey].
   Future<GeoFeature> stitchFeature(
     GeoFeature feature, {
     required String idKey,
@@ -271,20 +272,17 @@ class GeoQuery {
       if (feature.coordinates != null) ...feature.coordinates!,
     ];
     final visitedTiles = <(int x, int y)>{(startX, startY)};
-    final queue = <(int x, int y)>[(startX, startY)];
-
-    // 8-direction offsets: horizontal, vertical, and diagonals
-    const offsets = [
-      (-1, 0), (1, 0), (0, -1), (0, 1),
-      (-1, -1), (-1, 1), (1, -1), (1, 1),
+    final queue = <((int x, int y), List<(int dx, int dy)>)>[
+      ((startX, startY), feature.candidateNeighborOffsets),
     ];
 
     while (queue.isNotEmpty && visitedTiles.length < maxDepth) {
-      final current = queue.removeAt(0);
+      final (currentTile, candidateOffsets) = queue.removeAt(0);
 
-      for (final (dx, dy) in offsets) {
-        final nx = current.$1 + dx;
-        final ny = current.$2 + dy;
+      // Visit ONLY the candidate offsets corresponding to touched edges
+      for (final (dx, dy) in candidateOffsets) {
+        final nx = currentTile.$1 + dx;
+        final ny = currentTile.$2 + dy;
 
         if (nx < 0 || nx > maxTile || ny < 0 || ny > maxTile) continue;
         if (visitedTiles.contains((nx, ny))) continue;
@@ -297,7 +295,8 @@ class GeoQuery {
           final nTile = await _archive.tile(neighborTileId);
           final rawBytes = nTile.bytes();
           if (rawBytes.isNotEmpty) {
-            bytesToSend = rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
+            bytesToSend =
+                rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
             _workerCachedTileIds.add(neighborTileId);
           }
         }
@@ -320,8 +319,10 @@ class GeoQuery {
                 allRings.add(ring.map((c) => LatLng(c.$1, c.$2)).toList());
               }
             }
-            if (dto.touchesTileBoundary && visitedTiles.length < maxDepth) {
-              queue.add((nx, ny));
+            if (dto.touchesTileBoundary &&
+                visitedTiles.length < maxDepth &&
+                dto.candidateNeighborOffsets.isNotEmpty) {
+              queue.add(((nx, ny), dto.candidateNeighborOffsets));
             }
           }
         }
@@ -330,7 +331,7 @@ class GeoQuery {
 
     return feature.copyWith(
       coordinates: allRings,
-      touchesTileBoundary: false, // Stitched
+      touchesTileBoundary: false, // Fully stitched
     );
   }
 
