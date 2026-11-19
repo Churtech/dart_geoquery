@@ -127,13 +127,27 @@ class GeoQuery {
   }
 
   /// Finds the first feature containing [point] via Point-in-Polygon.
+  ///
+  /// If [stitchBoundaries] is true and the feature intersects the tile edge,
+  /// neighboring tiles are checked by [idKey] to stitch boundary parts into
+  /// a continuous geometry.
   Future<GeoFeature?> at(
     LatLng point, {
     String? layer,
     int? zoom,
+    bool stitchBoundaries = false,
+    String idKey = 'id',
+    int maxStitchDepth = 4,
   }) async {
     final results = await allAt(point, layer: layer, zoom: zoom);
-    return results.isNotEmpty ? results.first : null;
+    if (results.isEmpty) return null;
+
+    final first = results.first;
+    if (stitchBoundaries && first.touchesTileBoundary) {
+      return stitchFeature(first, idKey: idKey, maxDepth: maxStitchDepth);
+    }
+
+    return first;
   }
 
   /// Finds all features containing [point] via Point-in-Polygon.
@@ -146,7 +160,6 @@ class GeoQuery {
     final (tileX, tileY) = TileMath.latLngToTile(point, targetZoom);
     final tileId = ZXY(targetZoom, tileX, tileY).toTileId();
 
-    // Default extent in MVT standard is 4096
     const defaultExtent = 4096;
     final (localX, localY) = TileMath.latLngToTileCoordinates(
       point: point,
@@ -168,20 +181,30 @@ class GeoQuery {
 
       final dtos = await _worker.queryPoint(
         tileId: tileId,
+        tileX: tileX,
+        tileY: tileY,
+        zoom: targetZoom,
         localX: localX,
         localY: localY,
         layer: layer,
         tileBytes: bytesToSend,
       );
 
-      return dtos
-          .map((d) => GeoFeature(
-                id: d.id,
-                layer: d.layer,
-                properties: d.properties,
-                geometryType: d.geometryType,
-              ))
-          .toList();
+      return dtos.map((d) {
+        final rings = d.coordinates
+            ?.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList())
+            .toList();
+
+        return GeoFeature(
+          id: d.id,
+          layer: d.layer,
+          properties: d.properties,
+          geometryType: d.geometryType,
+          coordinates: rings,
+          touchesTileBoundary: d.touchesTileBoundary,
+          sourceTile: d.sourceTile,
+        );
+      }).toList();
     }
 
     // Direct synchronous fallback (without isolate)
@@ -211,12 +234,104 @@ class GeoQuery {
         final isInside = _testFeatureContainsPoint(feature, layerLocalX, layerLocalY);
 
         if (isInside) {
-          matchingFeatures.add(_toGeoFeature(feature, vLayer.name));
+          matchingFeatures.add(_toGeoFeature(
+            feature,
+            vLayer.name,
+            tileX,
+            tileY,
+            targetZoom,
+            vLayer.extent,
+          ));
         }
       }
     }
 
     return matchingFeatures;
+  }
+
+  /// Stitches geometries across tile borders by querying up to 8 neighboring tiles
+  /// (including diagonals) matching the same [idKey].
+  Future<GeoFeature> stitchFeature(
+    GeoFeature feature, {
+    required String idKey,
+    int maxDepth = 4,
+  }) async {
+    final source = feature.sourceTile;
+    if (source == null || !feature.touchesTileBoundary) {
+      return feature;
+    }
+
+    final idValue = idKey == 'id' ? feature.id : feature.properties[idKey];
+    if (idValue == null) return feature;
+
+    final (startX, startY, zoom) = source;
+    final maxTile = (1 << zoom) - 1;
+
+    final allRings = <List<LatLng>>[
+      if (feature.coordinates != null) ...feature.coordinates!,
+    ];
+    final visitedTiles = <(int x, int y)>{(startX, startY)};
+    final queue = <(int x, int y)>[(startX, startY)];
+
+    // 8-direction offsets: horizontal, vertical, and diagonals
+    const offsets = [
+      (-1, 0), (1, 0), (0, -1), (0, 1),
+      (-1, -1), (-1, 1), (1, -1), (1, 1),
+    ];
+
+    while (queue.isNotEmpty && visitedTiles.length < maxDepth) {
+      final current = queue.removeAt(0);
+
+      for (final (dx, dy) in offsets) {
+        final nx = current.$1 + dx;
+        final ny = current.$2 + dy;
+
+        if (nx < 0 || nx > maxTile || ny < 0 || ny > maxTile) continue;
+        if (visitedTiles.contains((nx, ny))) continue;
+
+        visitedTiles.add((nx, ny));
+        final neighborTileId = ZXY(zoom, nx, ny).toTileId();
+
+        Uint8List? bytesToSend;
+        if (!_workerCachedTileIds.contains(neighborTileId)) {
+          final nTile = await _archive.tile(neighborTileId);
+          final rawBytes = nTile.bytes();
+          if (rawBytes.isNotEmpty) {
+            bytesToSend = rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
+            _workerCachedTileIds.add(neighborTileId);
+          }
+        }
+
+        if (_worker != null) {
+          final dtos = await _worker.fetchFeatureById(
+            tileId: neighborTileId,
+            tileX: nx,
+            tileY: ny,
+            zoom: zoom,
+            layer: feature.layer,
+            idKey: idKey,
+            idValue: idValue,
+            tileBytes: bytesToSend,
+          );
+
+          for (final dto in dtos) {
+            if (dto.coordinates != null) {
+              for (final ring in dto.coordinates!) {
+                allRings.add(ring.map((c) => LatLng(c.$1, c.$2)).toList());
+              }
+            }
+            if (dto.touchesTileBoundary && visitedTiles.length < maxDepth) {
+              queue.add((nx, ny));
+            }
+          }
+        }
+      }
+    }
+
+    return feature.copyWith(
+      coordinates: allRings,
+      touchesTileBoundary: false, // Stitched
+    );
   }
 
   /// Finds all features within [radiusMeters] of [center].
@@ -255,7 +370,14 @@ class GeoQuery {
             extent: vLayer.extent,
           );
           if (center.distanceTo(latLng) <= radiusMeters) {
-            matchingFeatures.add(_toGeoFeature(feature, vLayer.name));
+            matchingFeatures.add(_toGeoFeature(
+              feature,
+              vLayer.name,
+              tileX,
+              tileY,
+              targetZoom,
+              vLayer.extent,
+            ));
           }
         } else if (geom is GeometryPolygon || geom is GeometryMultiPolygon) {
           final (localX, localY) = TileMath.latLngToTileCoordinates(
@@ -264,7 +386,14 @@ class GeoQuery {
             extent: vLayer.extent,
           );
           if (_testFeatureContainsPoint(feature, localX, localY)) {
-            matchingFeatures.add(_toGeoFeature(feature, vLayer.name));
+            matchingFeatures.add(_toGeoFeature(
+              feature,
+              vLayer.name,
+              tileX,
+              tileY,
+              targetZoom,
+              vLayer.extent,
+            ));
           }
         }
       }
@@ -296,7 +425,14 @@ class GeoQuery {
         if (vLayer.name != layer) continue;
 
         for (final feature in vLayer.features) {
-          final geoFeature = _toGeoFeature(feature, vLayer.name);
+          final geoFeature = _toGeoFeature(
+            feature,
+            vLayer.name,
+            zxy.x,
+            zxy.y,
+            targetZoom,
+            vLayer.extent,
+          );
           if (predicate(geoFeature)) {
             matchingFeatures.add(geoFeature);
           }
@@ -336,7 +472,14 @@ class GeoQuery {
     return false;
   }
 
-  GeoFeature _toGeoFeature(VectorTileFeature feature, String layerName) {
+  GeoFeature _toGeoFeature(
+    VectorTileFeature feature,
+    String layerName,
+    int tileX,
+    int tileY,
+    int zoom,
+    int extent,
+  ) {
     feature.decodeProperties();
     final rawProps = feature.properties ?? const {};
     final props = <String, dynamic>{};
@@ -357,6 +500,7 @@ class GeoQuery {
       layer: layerName,
       properties: props,
       geometryType: feature.geometryType?.name ?? 'Unknown',
+      sourceTile: (tileX, tileY, zoom),
     );
   }
 }

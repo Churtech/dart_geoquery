@@ -1,0 +1,20 @@
+name: dart_geoquery_flutter
+description: Interactive vector feature selection and highlighting layer for flutter_map powered by dart_geoquery.
+version: 1.0.0
+resolution: workspace
+
+environment:
+  sdk: ^3.13.5
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_map: ^8.0.0
+  latlong2: ^0.10.1
+  dart_geoquery:
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
