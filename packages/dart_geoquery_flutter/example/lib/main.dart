@@ -227,11 +227,11 @@ class _MapScreenState extends State<MapScreen> {
                     onTap: (_, point) => _onMapTap(point),
                   ),
                   children: [
-                    // 1. Base Map Tile Layer (OpenStreetMap / Carto)
+                    // 1. Base Map Tile Layer (CartoDB Voyager)
                     TileLayer(
                       urlTemplate:
-                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'co.churquitos.dart_geoquery.example',
+                          'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+                      userAgentPackageName: 'com.example.example',
                     ),
 
                     // 2. Debug Tile Grid Layer
