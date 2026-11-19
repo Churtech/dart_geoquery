@@ -387,10 +387,13 @@ class _MapScreenState extends State<MapScreen> {
                         child: const Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Text(
-                              '© OpenStreetMap contributors | Data © LINZ (New Zealand) | PMTiles by Protomaps',
-                              style: TextStyle(
-                                  color: Colors.white70, fontSize: 10),
+                            Expanded(
+                              child: Text(
+                                '© OpenStreetMap contributors | Data © LINZ (New Zealand) | PMTiles by Protomaps',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    color: Colors.white70, fontSize: 10),
+                              ),
                             ),
                           ],
                         ),
