@@ -5,6 +5,7 @@ import 'package:fixnum/fixnum.dart';
 import 'package:pmtiles/pmtiles.dart';
 import 'package:vector_tile/vector_tile.dart';
 
+import 'isolate/isolate_query_worker.dart';
 import 'models/geo_feature.dart';
 import 'models/lat_lng.dart';
 import 'spatial/point_in_polygon.dart';
@@ -15,27 +16,54 @@ class GeoQuery {
   final PmTilesArchive _archive;
   final Map<String, dynamic>? _metadata;
   final Map<String, (int minZoom, int maxZoom)> _layerZoomRanges;
+  final IsolateQueryWorker? _worker;
+  final Set<int> _workerCachedTileIds = <int>{};
 
   GeoQuery._(
     this._archive, {
     this._metadata,
     this._layerZoomRanges = const {},
+    this._worker,
   });
 
   /// Opens a local PMTiles file or remote URL.
-  static Future<GeoQuery> open(String pathOrUrl) async {
+  ///
+  /// [useIsolate] offloads MVT decoding and spatial operations to a dedicated
+  /// background worker isolate, keeping the UI/main thread completely free.
+  /// [cacheCapacity] defines the number of decoded tiles to keep in the isolate's LRU cache.
+  static Future<GeoQuery> open(
+    String pathOrUrl, {
+    bool useIsolate = true,
+    int cacheCapacity = 64,
+  }) async {
     final archive = await PmTilesArchive.from(pathOrUrl);
-    return fromArchive(archive);
+    return fromArchive(
+      archive,
+      useIsolate: useIsolate,
+      cacheCapacity: cacheCapacity,
+    );
   }
 
   /// Creates a [GeoQuery] instance from in-memory PMTiles bytes.
-  static Future<GeoQuery> fromBytes(Uint8List bytes) async {
+  static Future<GeoQuery> fromBytes(
+    Uint8List bytes, {
+    bool useIsolate = true,
+    int cacheCapacity = 64,
+  }) async {
     final archive = await PmTilesArchive.fromBytes(bytes);
-    return fromArchive(archive);
+    return fromArchive(
+      archive,
+      useIsolate: useIsolate,
+      cacheCapacity: cacheCapacity,
+    );
   }
 
   /// Creates a [GeoQuery] instance from an existing [PmTilesArchive].
-  static Future<GeoQuery> fromArchive(PmTilesArchive archive) async {
+  static Future<GeoQuery> fromArchive(
+    PmTilesArchive archive, {
+    bool useIsolate = true,
+    int cacheCapacity = 64,
+  }) async {
     Map<String, dynamic>? meta;
     final layerZoomRanges = <String, (int minZoom, int maxZoom)>{};
 
@@ -47,7 +75,6 @@ class GeoQuery {
         meta = rawMeta.cast<String, dynamic>();
       }
 
-      // Parse vector_layers if present in metadata
       if (meta != null && meta['vector_layers'] is List) {
         final layersList = meta['vector_layers'] as List;
         for (final item in layersList) {
@@ -62,13 +89,19 @@ class GeoQuery {
         }
       }
     } catch (_) {
-      // Metadata read error is non-fatal; falls back to archive header zooms
+      // Non-fatal; falls back to archive header zooms
+    }
+
+    IsolateQueryWorker? worker;
+    if (useIsolate) {
+      worker = await IsolateQueryWorker.spawn(cacheCapacity: cacheCapacity);
     }
 
     return GeoQuery._(
       archive,
       metadata: meta,
       layerZoomRanges: layerZoomRanges,
+      worker: worker,
     );
   }
 
@@ -94,9 +127,6 @@ class GeoQuery {
   }
 
   /// Finds the first feature containing [point] via Point-in-Polygon.
-  ///
-  /// Optionally filter by [layer] name or specify [zoom] level.
-  /// Returns `null` if no polygon contains the point.
   Future<GeoFeature?> at(
     LatLng point, {
     String? layer,
@@ -107,8 +137,6 @@ class GeoQuery {
   }
 
   /// Finds all features containing [point] via Point-in-Polygon.
-  ///
-  /// Useful when layers overlap or multiple polygon features match the point.
   Future<List<GeoFeature>> allAt(
     LatLng point, {
     String? layer,
@@ -118,34 +146,69 @@ class GeoQuery {
     final (tileX, tileY) = TileMath.latLngToTile(point, targetZoom);
     final tileId = ZXY(targetZoom, tileX, tileY).toTileId();
 
+    // Default extent in MVT standard is 4096
+    const defaultExtent = 4096;
+    final (localX, localY) = TileMath.latLngToTileCoordinates(
+      point: point,
+      zoom: targetZoom,
+      extent: defaultExtent,
+    );
+
+    // If long-lived isolate worker is enabled, offload decoding & PIP
+    if (_worker != null) {
+      Uint8List? bytesToSend;
+      if (!_workerCachedTileIds.contains(tileId)) {
+        final tile = await _archive.tile(tileId);
+        final rawBytes = tile.bytes();
+        if (rawBytes.isEmpty) return const [];
+
+        bytesToSend = rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
+        _workerCachedTileIds.add(tileId);
+      }
+
+      final dtos = await _worker.queryPoint(
+        tileId: tileId,
+        localX: localX,
+        localY: localY,
+        layer: layer,
+        tileBytes: bytesToSend,
+      );
+
+      return dtos
+          .map((d) => GeoFeature(
+                id: d.id,
+                layer: d.layer,
+                properties: d.properties,
+                geometryType: d.geometryType,
+              ))
+          .toList();
+    }
+
+    // Direct synchronous fallback (without isolate)
     final tile = await _archive.tile(tileId);
     final bytes = tile.bytes();
-    if (bytes.isEmpty) {
-      return const [];
-    }
+    if (bytes.isEmpty) return const [];
 
     final uint8Bytes = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     final vectorTile = VectorTile.fromBytes(bytes: uint8Bytes);
     final matchingFeatures = <GeoFeature>[];
 
     for (final vLayer in vectorTile.layers) {
-      if (layer != null && vLayer.name != layer) {
-        continue;
-      }
+      if (layer != null && vLayer.name != layer) continue;
 
-      final (localX, localY) = TileMath.latLngToTileCoordinates(
-        point: point,
-        zoom: targetZoom,
-        extent: vLayer.extent,
-      );
+      final (layerLocalX, layerLocalY) = vLayer.extent == defaultExtent
+          ? (localX, localY)
+          : TileMath.latLngToTileCoordinates(
+              point: point,
+              zoom: targetZoom,
+              extent: vLayer.extent,
+            );
 
       for (final feature in vLayer.features) {
-        if (feature.type != VectorTileGeomType.POLYGON) {
-          continue;
-        }
+        if (feature.type != VectorTileGeomType.POLYGON) continue;
 
         feature.decodeGeometry();
-        final isInside = _testFeatureContainsPoint(feature, localX, localY);
+        final isInside = _testFeatureContainsPoint(feature, layerLocalX, layerLocalY);
 
         if (isInside) {
           matchingFeatures.add(_toGeoFeature(feature, vLayer.name));
@@ -157,8 +220,6 @@ class GeoQuery {
   }
 
   /// Finds all features within [radiusMeters] of [center].
-  ///
-  /// Works for points, linestrings, and polygons.
   Future<List<GeoFeature>> within(
     LatLng center, {
     required double radiusMeters,
@@ -171,18 +232,14 @@ class GeoQuery {
 
     final tile = await _archive.tile(tileId);
     final bytes = tile.bytes();
-    if (bytes.isEmpty) {
-      return const [];
-    }
+    if (bytes.isEmpty) return const [];
 
     final uint8Bytes = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     final vectorTile = VectorTile.fromBytes(bytes: uint8Bytes);
     final matchingFeatures = <GeoFeature>[];
 
     for (final vLayer in vectorTile.layers) {
-      if (layer != null && vLayer.name != layer) {
-        continue;
-      }
+      if (layer != null && vLayer.name != layer) continue;
 
       for (final feature in vLayer.features) {
         feature.decodeGeometry();
@@ -250,6 +307,11 @@ class GeoQuery {
     return matchingFeatures;
   }
 
+  /// Closes the background isolate and releases resources.
+  void close() {
+    _worker?.close();
+  }
+
   bool _testFeatureContainsPoint(
     VectorTileFeature feature,
     double localX,
@@ -257,11 +319,10 @@ class GeoQuery {
   ) {
     final geom = feature.geometry;
     if (geom is GeometryPolygon) {
-      final coords = geom.coordinates;
       return PointInPolygon.containsPoint(
         px: localX,
         py: localY,
-        rings: coords,
+        rings: geom.coordinates,
       );
     } else if (geom is GeometryMultiPolygon) {
       final coords = geom.coordinates;

@@ -164,6 +164,51 @@ void main() {
         isFalse,
       );
     });
+
+    test('tile boundary: clipped polygon in adjacent tiles detects point on respective side', () {
+      // Simulates a building spanning across tile boundary X=10 and X=11 (extent 4096)
+      // Tile 10 clipped slice: x from 3900 to 4096 (plus buffer to 4160)
+      final tile10ClippedRing = [
+        [
+          [3900.0, 1000.0],
+          [4160.0, 1000.0],
+          [4160.0, 1200.0],
+          [3900.0, 1200.0],
+          [3900.0, 1000.0],
+        ]
+      ];
+
+      // Tile 11 clipped slice: x from -64 to 200
+      final tile11ClippedRing = [
+        [
+          [-64.0, 1000.0],
+          [200.0, 1000.0],
+          [200.0, 1200.0],
+          [-64.0, 1200.0],
+          [-64.0, 1000.0],
+        ]
+      ];
+
+      // Point A: just inside Tile 10 side (local x = 4050, y = 1100)
+      expect(
+        PointInPolygon.containsPoint(
+          px: 4050.0,
+          py: 1100.0,
+          rings: tile10ClippedRing,
+        ),
+        isTrue,
+      );
+
+      // Point B: just inside Tile 11 side (local x = 50, y = 1100)
+      expect(
+        PointInPolygon.containsPoint(
+          px: 50.0,
+          py: 1100.0,
+          rings: tile11ClippedRing,
+        ),
+        isTrue,
+      );
+    });
   });
 
   group('GeoFeature', () {
@@ -184,6 +229,24 @@ void main() {
       expect(feature.get<double>('area'), equals(1250.5));
       expect(feature.get<int>('code'), equals(1102));
       expect(feature.get<String>('unknown'), isNull);
+    });
+  });
+
+  group('LruCache', () {
+    test('evicts least recently used item when capacity exceeded', () {
+      final cache = LruCache<String, int>(capacity: 2);
+      cache.put('a', 1);
+      cache.put('b', 2);
+      expect(cache.length, equals(2));
+
+      // Access 'a' to make it most recently used
+      expect(cache.get('a'), equals(1));
+
+      // Add 'c', should evict 'b'
+      cache.put('c', 3);
+      expect(cache.containsKey('b'), isFalse);
+      expect(cache.containsKey('a'), isTrue);
+      expect(cache.containsKey('c'), isTrue);
     });
   });
 }
