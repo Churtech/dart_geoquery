@@ -227,11 +227,18 @@ class _MapScreenState extends State<MapScreen> {
                     onTap: (_, point) => _onMapTap(point),
                   ),
                   children: [
-                    // 1. Base Map Tile Layer (CartoDB Voyager)
+                    // 1. Base Map Tile Layer (OpenStreetMap with custom verified headers)
                     TileLayer(
                       urlTemplate:
-                          'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.example',
+                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                      userAgentPackageName: 'co.churtech.dart_geoquery',
+                      tileProvider: NetworkTileProvider(
+                        headers: {
+                          'User-Agent':
+                              'DartGeoQueryDemo/1.0.0 (contact@churtech.com)',
+                        },
+                        cachingProvider: const DisabledMapCachingProvider(),
+                      ),
                     ),
 
                     // 2. Debug Tile Grid Layer
