@@ -414,4 +414,23 @@ void main() {
       expect(cache.containsKey('c'), isTrue);
     });
   });
+
+  group('MultiPolygon Querying', () {
+    test('isolates matching polygon part in MultiPolygon', () async {
+      final query = await GeoQuery.open('../../bogota.pmtiles', useIsolate: true);
+      const point = LatLng(4.67098, -74.05507);
+      final feat = await query.at(point, layer: 'buildings');
+      expect(feat, isNotNull);
+      expect(feat!.coordinates, isNotNull);
+      // Ring count of the single matched polygon should be 1, not 700+!
+      expect(feat.coordinates!.length, lessThan(10));
+      // Outer ring should be around the clicked point!
+      final outer = feat.coordinates!.first;
+      final avgLat = outer.map((p) => p.latitude).reduce((a, b) => a + b) / outer.length;
+      final avgLng = outer.map((p) => p.longitude).reduce((a, b) => a + b) / outer.length;
+      expect(avgLat, closeTo(point.latitude, 0.005));
+      expect(avgLng, closeTo(point.longitude, 0.005));
+      query.close();
+    });
+  });
 }

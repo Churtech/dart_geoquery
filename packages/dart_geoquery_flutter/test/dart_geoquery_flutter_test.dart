@@ -56,6 +56,33 @@ void main() {
       expect(controller.selectedFeatures, isEmpty);
       expect(controller.selectedIds, isEmpty);
     });
+
+    test('respects multiSelect: false by replacing previous selection', () {
+      final controller = GeoSelectionController(multiSelect: false);
+      const featureA = gq.GeoFeature(
+        id: 101,
+        layer: 'buildings',
+        properties: {'name': 'Tower A'},
+        geometryType: 'Polygon',
+      );
+      const featureB = gq.GeoFeature(
+        id: 102,
+        layer: 'buildings',
+        properties: {'name': 'Tower B'},
+        geometryType: 'Polygon',
+      );
+
+      controller.select(featureA);
+      expect(controller.selectedIds, equals({101}));
+
+      controller.toggle(featureB);
+      expect(controller.selectedIds, equals({102}));
+      expect(controller.isSelected(101), isFalse);
+      expect(controller.isSelected(102), isTrue);
+
+      controller.toggle(featureB);
+      expect(controller.selectedIds, isEmpty);
+    });
   });
 
   group('GeoInteractiveLayer Widget', () {

@@ -47,7 +47,6 @@ class _CachedFeature {
   final List<double> bbox; // [minX, minY, maxX, maxY]
   final bool touchesBoundary;
   final List<(int dx, int dy)> candidateNeighborOffsets;
-  final List<List<(double lat, double lon)>> projectedRings;
 
   _CachedFeature({
     this.id,
@@ -57,7 +56,6 @@ class _CachedFeature {
     required this.bbox,
     required this.touchesBoundary,
     required this.candidateNeighborOffsets,
-    required this.projectedRings,
   });
 }
 
@@ -256,15 +254,6 @@ class IsolateQueryWorker {
           touchBottom: touchBottom,
         );
 
-        // Sutherland-Hodgman clipping against [0, extent] before WGS84 projection
-        final projectedRings = _projectClippedRings(
-          geom,
-          tileX,
-          tileY,
-          zoom,
-          extent,
-        );
-
         polygonFeatures.add(_CachedFeature(
           id: id,
           properties: props,
@@ -273,7 +262,6 @@ class IsolateQueryWorker {
           bbox: bbox,
           touchesBoundary: touches,
           candidateNeighborOffsets: candidateOffsets,
-          projectedRings: projectedRings,
         ));
       }
 
@@ -343,18 +331,84 @@ class IsolateQueryWorker {
           continue;
         }
 
-        final isInside = _testGeometryContains(feat.geometry, px, py);
-        if (isInside) {
-          matches.add(GeoFeatureDto(
-            id: feat.id,
-            layer: layer.name,
-            properties: feat.properties,
-            geometryType: feat.geometryType,
-            coordinates: feat.projectedRings,
-            touchesTileBoundary: feat.touchesBoundary,
-            candidateNeighborOffsets: feat.candidateNeighborOffsets,
-            sourceTile: (cached.tileX, cached.tileY, cached.zoom),
-          ));
+        if (feat.geometry is GeometryPolygon) {
+          final isInside = PointInPolygon.containsPoint(
+            px: px,
+            py: py,
+            rings: (feat.geometry as GeometryPolygon).coordinates,
+          );
+          if (isInside) {
+            final projected = _projectPolygonRings(
+              (feat.geometry as GeometryPolygon).coordinates,
+              cached.tileX,
+              cached.tileY,
+              cached.zoom,
+              layer.extent,
+            );
+            matches.add(GeoFeatureDto(
+              id: feat.id,
+              layer: layer.name,
+              properties: feat.properties,
+              geometryType: feat.geometryType,
+              coordinates: projected,
+              touchesTileBoundary: feat.touchesBoundary,
+              candidateNeighborOffsets: feat.candidateNeighborOffsets,
+              sourceTile: (cached.tileX, cached.tileY, cached.zoom),
+            ));
+          }
+        } else if (feat.geometry is GeometryMultiPolygon) {
+          final multiCoords =
+              (feat.geometry as GeometryMultiPolygon).coordinates;
+          if (multiCoords != null) {
+            for (int i = 0; i < multiCoords.length; i++) {
+              final poly = multiCoords[i];
+              final isInside = PointInPolygon.containsPoint(
+                px: px,
+                py: py,
+                rings: poly,
+              );
+              if (isInside) {
+                // Project ONLY this exact matched polygon part on demand
+                final projected = _projectPolygonRings(
+                  poly,
+                  cached.tileX,
+                  cached.tileY,
+                  cached.zoom,
+                  layer.extent,
+                );
+
+                // Check if this specific polygon part touches the tile boundary
+                final partBbox = _calculatePolygonBbox(poly);
+                final extent = layer.extent.toDouble();
+                final touchLeft = partBbox[0] <= 0.0;
+                final touchRight = partBbox[2] >= extent;
+                final touchTop = partBbox[1] <= 0.0;
+                final touchBottom = partBbox[3] >= extent;
+                final touches =
+                    touchLeft || touchRight || touchTop || touchBottom;
+                final candidateOffsets = touches
+                    ? _computeNeighborOffsets(
+                        touchLeft: touchLeft,
+                        touchRight: touchRight,
+                        touchTop: touchTop,
+                        touchBottom: touchBottom,
+                      )
+                    : const <(int dx, int dy)>[];
+
+                matches.add(GeoFeatureDto(
+                  id: feat.id,
+                  layer: layer.name,
+                  properties: feat.properties,
+                  geometryType: feat.geometryType,
+                  coordinates: projected,
+                  touchesTileBoundary: touches,
+                  candidateNeighborOffsets: candidateOffsets,
+                  sourceTile: (cached.tileX, cached.tileY, cached.zoom),
+                ));
+                break;
+              }
+            }
+          }
         }
       }
     }
@@ -387,16 +441,51 @@ class IsolateQueryWorker {
             feat.properties[req.idKey] == req.idValue;
 
         if (matchesId) {
-          matches.add(GeoFeatureDto(
-            id: feat.id,
-            layer: layer.name,
-            properties: feat.properties,
-            geometryType: feat.geometryType,
-            coordinates: feat.projectedRings,
-            touchesTileBoundary: feat.touchesBoundary,
-            candidateNeighborOffsets: feat.candidateNeighborOffsets,
-            sourceTile: (cached.tileX, cached.tileY, cached.zoom),
-          ));
+          if (feat.geometry is GeometryPolygon) {
+            final projected = _projectPolygonRings(
+              (feat.geometry as GeometryPolygon).coordinates,
+              cached.tileX,
+              cached.tileY,
+              cached.zoom,
+              layer.extent,
+            );
+            matches.add(GeoFeatureDto(
+              id: feat.id,
+              layer: layer.name,
+              properties: feat.properties,
+              geometryType: feat.geometryType,
+              coordinates: projected,
+              touchesTileBoundary: feat.touchesBoundary,
+              candidateNeighborOffsets: feat.candidateNeighborOffsets,
+              sourceTile: (cached.tileX, cached.tileY, cached.zoom),
+            ));
+          } else if (feat.geometry is GeometryMultiPolygon) {
+            final multiCoords =
+                (feat.geometry as GeometryMultiPolygon).coordinates;
+            if (multiCoords != null) {
+              for (final poly in multiCoords) {
+                final projected = _projectPolygonRings(
+                  poly,
+                  cached.tileX,
+                  cached.tileY,
+                  cached.zoom,
+                  layer.extent,
+                );
+                if (projected.isNotEmpty) {
+                  matches.add(GeoFeatureDto(
+                    id: feat.id,
+                    layer: layer.name,
+                    properties: feat.properties,
+                    geometryType: feat.geometryType,
+                    coordinates: projected,
+                    touchesTileBoundary: feat.touchesBoundary,
+                    candidateNeighborOffsets: feat.candidateNeighborOffsets,
+                    sourceTile: (cached.tileX, cached.tileY, cached.zoom),
+                  ));
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -404,8 +493,8 @@ class IsolateQueryWorker {
     return matches;
   }
 
-  static List<List<(double lat, double lon)>> _projectClippedRings(
-    Geometry geom,
+  static List<List<(double lat, double lon)>> _projectPolygonRings(
+    List<dynamic> polygonRings,
     int tileX,
     int tileY,
     int zoom,
@@ -413,19 +502,28 @@ class IsolateQueryWorker {
   ) {
     final rings = <List<(double lat, double lon)>>[];
 
-    void processRing(List<List<double>> rawRing) {
-      // 1. Sutherland-Hodgman clipping against exact tile boundary
+    for (final rawRing in polygonRings) {
+      if (rawRing is! List) continue;
+      final doubleRing = <List<double>>[];
+      for (final pt in rawRing) {
+        if (pt is List && pt.length >= 2) {
+          doubleRing.add(
+            [(pt[0] as num).toDouble(), (pt[1] as num).toDouble()],
+          );
+        }
+      }
+      if (doubleRing.length < 3) continue;
+
       final clipped = PolygonClipping.clipRingToBox(
-        rawRing,
+        doubleRing,
         minX: 0.0,
         minY: 0.0,
         maxX: extent.toDouble(),
         maxY: extent.toDouble(),
       );
 
-      if (clipped.length < 3) return;
+      if (clipped.length < 3) continue;
 
-      // 2. Project clipped vertices to WGS84 LatLng
       final projected = <(double lat, double lon)>[];
       for (final pt in clipped) {
         final latLng = TileMath.tileCoordinatesToLatLng(
@@ -444,22 +542,29 @@ class IsolateQueryWorker {
       }
     }
 
-    if (geom is GeometryPolygon) {
-      for (final ring in geom.coordinates) {
-        processRing(ring);
-      }
-    } else if (geom is GeometryMultiPolygon) {
-      final polyCoords = geom.coordinates;
-      if (polyCoords != null) {
-        for (final poly in polyCoords) {
-          for (final ring in poly) {
-            processRing(ring);
-          }
+    return rings;
+  }
+
+  static List<double> _calculatePolygonBbox(List<dynamic> polygonRings) {
+    var minX = double.infinity;
+    var maxX = -double.infinity;
+    var minY = double.infinity;
+    var maxY = -double.infinity;
+
+    for (final rawRing in polygonRings) {
+      if (rawRing is! List) continue;
+      for (final pt in rawRing) {
+        if (pt is List && pt.length >= 2) {
+          final x = (pt[0] as num).toDouble();
+          final y = (pt[1] as num).toDouble();
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
         }
       }
     }
-
-    return rings;
+    return [minX, minY, maxX, maxY];
   }
 
   static List<double> _calculateBbox(Geometry geom) {
@@ -495,25 +600,6 @@ class IsolateQueryWorker {
     }
 
     return [minX, minY, maxX, maxY];
-  }
-
-  static bool _testGeometryContains(Geometry geom, double px, double py) {
-    if (geom is GeometryPolygon) {
-      return PointInPolygon.containsPoint(
-        px: px,
-        py: py,
-        rings: geom.coordinates,
-      );
-    } else if (geom is GeometryMultiPolygon) {
-      final coords = geom.coordinates;
-      if (coords == null) return false;
-      return PointInPolygon.containsPointInMultiPolygon(
-        px: px,
-        py: py,
-        multiPolygon: coords,
-      );
-    }
-    return false;
   }
 
   static Map<String, dynamic> _extractProperties(

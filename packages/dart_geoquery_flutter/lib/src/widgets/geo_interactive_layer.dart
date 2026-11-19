@@ -168,7 +168,10 @@ class GeoInteractiveLayerState extends State<GeoInteractiveLayer> {
           );
         }
 
-        return PolygonLayer(polygons: polygons);
+        return PolygonLayer(
+          polygonCulling: false,
+          polygons: polygons,
+        );
       },
     );
   }

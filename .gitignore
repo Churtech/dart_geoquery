@@ -1,7 +1,13 @@
-# https://dart.dev/tools/private-files
-# Created by `dart pub`
+# Dart & Flutter
 .dart_tool/
-
-# Avoid committing pubspec.lock for library packages; see
-# https://dart.dev/tools/pub/private-files#pubspec-lock.
 pubspec.lock
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# PMTiles
+*.pmtiles
+/demo.mp4
+/device_screenshot.png
+/tools/
+/packages/dart_geoquery/example/test_*.dart

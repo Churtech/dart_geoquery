@@ -119,9 +119,9 @@ class GeoQuery {
 
   /// Resolves the optimal zoom level for querying a specific [layer].
   int resolveZoomForLayer(String? layer, int? requestedZoom) {
-    if (requestedZoom != null) return requestedZoom;
+    if (requestedZoom != null) return requestedZoom.clamp(minZoom, maxZoom);
     if (layer != null && _layerZoomRanges.containsKey(layer)) {
-      return _layerZoomRanges[layer]!.$2;
+      return _layerZoomRanges[layer]!.$2.clamp(minZoom, maxZoom);
     }
     return maxZoom;
   }
@@ -171,12 +171,18 @@ class GeoQuery {
     if (_worker != null) {
       Uint8List? bytesToSend;
       if (!_workerCachedTileIds.contains(tileId)) {
-        final tile = await _archive.tile(tileId);
-        final rawBytes = tile.bytes();
-        if (rawBytes.isEmpty) return const [];
+        try {
+          final tile = await _archive.tile(tileId);
+          final rawBytes = tile.bytes();
+          if (rawBytes.isEmpty) return const [];
 
-        bytesToSend = rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
-        _workerCachedTileIds.add(tileId);
+          bytesToSend = rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
+          _workerCachedTileIds.add(tileId);
+        } on TileNotFoundException {
+          return const [];
+        } catch (_) {
+          return const [];
+        }
       }
 
       final dtos = await _worker.queryPoint(
@@ -195,12 +201,18 @@ class GeoQuery {
             ?.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList())
             .toList();
 
+        final multiRings = d.multiCoordinates
+            ?.map((part) =>
+                part.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList()).toList())
+            .toList();
+
         return GeoFeature(
           id: d.id,
           layer: d.layer,
           properties: d.properties,
           geometryType: d.geometryType,
           coordinates: rings,
+          multiCoordinates: multiRings,
           touchesTileBoundary: d.touchesTileBoundary,
           candidateNeighborOffsets: d.candidateNeighborOffsets,
           sourceTile: d.sourceTile,
@@ -209,9 +221,16 @@ class GeoQuery {
     }
 
     // Direct synchronous fallback (without isolate)
-    final tile = await _archive.tile(tileId);
-    final bytes = tile.bytes();
-    if (bytes.isEmpty) return const [];
+    late final List<int> bytes;
+    try {
+      final tile = await _archive.tile(tileId);
+      bytes = tile.bytes();
+      if (bytes.isEmpty) return const [];
+    } on TileNotFoundException {
+      return const [];
+    } catch (_) {
+      return const [];
+    }
 
     final uint8Bytes = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     final vectorTile = VectorTile.fromBytes(bytes: uint8Bytes);
@@ -232,9 +251,56 @@ class GeoQuery {
         if (feature.type != VectorTileGeomType.POLYGON) continue;
 
         feature.decodeGeometry();
-        final isInside = _testFeatureContainsPoint(feature, layerLocalX, layerLocalY);
+        final geom = feature.geometry;
+        if (geom == null) continue;
 
-        if (isInside) {
+        List<List<LatLng>>? matchedRings;
+        if (geom is GeometryPolygon) {
+          final isInside = PointInPolygon.containsPoint(
+            px: layerLocalX,
+            py: layerLocalY,
+            rings: geom.coordinates,
+          );
+          if (isInside) {
+            matchedRings = geom.coordinates
+                .map((r) => r
+                    .map((pt) => TileMath.tileCoordinatesToLatLng(
+                          tileX: tileX,
+                          tileY: tileY,
+                          zoom: targetZoom,
+                          localX: pt[0],
+                          localY: pt[1],
+                          extent: vLayer.extent,
+                        ))
+                    .toList())
+                .toList();
+          }
+        } else if (geom is GeometryMultiPolygon && geom.coordinates != null) {
+          for (final poly in geom.coordinates!) {
+            final isInside = PointInPolygon.containsPoint(
+              px: layerLocalX,
+              py: layerLocalY,
+              rings: poly,
+            );
+            if (isInside) {
+              matchedRings = poly
+                  .map((r) => r
+                      .map((pt) => TileMath.tileCoordinatesToLatLng(
+                            tileX: tileX,
+                            tileY: tileY,
+                            zoom: targetZoom,
+                            localX: pt[0],
+                            localY: pt[1],
+                            extent: vLayer.extent,
+                          ))
+                      .toList())
+                  .toList();
+              break;
+            }
+          }
+        }
+
+        if (matchedRings != null) {
           matchingFeatures.add(_toGeoFeature(
             feature,
             vLayer.name,
@@ -242,6 +308,7 @@ class GeoQuery {
             tileY,
             targetZoom,
             vLayer.extent,
+            coordinates: matchedRings,
           ));
         }
       }
@@ -346,9 +413,16 @@ class GeoQuery {
     final (tileX, tileY) = TileMath.latLngToTile(center, targetZoom);
     final tileId = ZXY(targetZoom, tileX, tileY).toTileId();
 
-    final tile = await _archive.tile(tileId);
-    final bytes = tile.bytes();
-    if (bytes.isEmpty) return const [];
+    late final List<int> bytes;
+    try {
+      final tile = await _archive.tile(tileId);
+      bytes = tile.bytes();
+      if (bytes.isEmpty) return const [];
+    } on TileNotFoundException {
+      return const [];
+    } catch (_) {
+      return const [];
+    }
 
     final uint8Bytes = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     final vectorTile = VectorTile.fromBytes(bytes: uint8Bytes);
@@ -479,8 +553,12 @@ class GeoQuery {
     int tileX,
     int tileY,
     int zoom,
-    int extent,
-  ) {
+    int extent, {
+    List<List<LatLng>>? coordinates,
+    List<List<List<LatLng>>>? multiCoordinates,
+    bool touchesBoundary = false,
+    List<(int dx, int dy)> candidateNeighborOffsets = const [],
+  }) {
     feature.decodeProperties();
     final rawProps = feature.properties ?? const {};
     final props = <String, dynamic>{};
@@ -501,6 +579,10 @@ class GeoQuery {
       layer: layerName,
       properties: props,
       geometryType: feature.geometryType?.name ?? 'Unknown',
+      coordinates: coordinates,
+      multiCoordinates: multiCoordinates,
+      touchesTileBoundary: touchesBoundary,
+      candidateNeighborOffsets: candidateNeighborOffsets,
       sourceTile: (tileX, tileY, zoom),
     );
   }

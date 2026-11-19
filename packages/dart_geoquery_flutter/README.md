@@ -2,6 +2,10 @@
 
 Interactive vector feature selection, spatial querying, and reactive highlighting for **`flutter_map`**, powered by the **`dart_geoquery`** engine.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Churtech/dart_geoquery/master/doc/demo.gif" alt="dart_geoquery_flutter demo" width="320" />
+</p>
+
 ---
 
 ## 🌟 Features

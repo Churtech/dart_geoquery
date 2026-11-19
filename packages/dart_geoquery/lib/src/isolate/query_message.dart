@@ -7,6 +7,7 @@ class GeoFeatureDto {
   final Map<String, dynamic> properties;
   final String geometryType;
   final List<List<(double lat, double lon)>>? coordinates;
+  final List<List<List<(double lat, double lon)>>>? multiCoordinates;
   final bool touchesTileBoundary;
   final List<(int dx, int dy)> candidateNeighborOffsets;
   final (int x, int y, int z)? sourceTile;
@@ -17,6 +18,7 @@ class GeoFeatureDto {
     required this.properties,
     required this.geometryType,
     this.coordinates,
+    this.multiCoordinates,
     this.touchesTileBoundary = false,
     this.candidateNeighborOffsets = const [],
     this.sourceTile,

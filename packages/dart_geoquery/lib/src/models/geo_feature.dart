@@ -17,6 +17,9 @@ class GeoFeature {
   /// Projected WGS84 polygon rings (outer ring followed by hole rings).
   final List<List<LatLng>>? coordinates;
 
+  /// All projected polygon parts if this feature is a MultiPolygon.
+  final List<List<List<LatLng>>>? multiCoordinates;
+
   /// Whether any vertex of this geometry touches or extends beyond the tile boundary.
   final bool touchesTileBoundary;
 
@@ -32,6 +35,7 @@ class GeoFeature {
     required this.properties,
     required this.geometryType,
     this.coordinates,
+    this.multiCoordinates,
     this.touchesTileBoundary = false,
     this.candidateNeighborOffsets = const [],
     this.sourceTile,
@@ -53,6 +57,7 @@ class GeoFeature {
     Map<String, dynamic>? properties,
     String? geometryType,
     List<List<LatLng>>? coordinates,
+    List<List<List<LatLng>>>? multiCoordinates,
     bool? touchesTileBoundary,
     List<(int dx, int dy)>? candidateNeighborOffsets,
     (int x, int y, int z)? sourceTile,
@@ -63,6 +68,7 @@ class GeoFeature {
       properties: properties ?? this.properties,
       geometryType: geometryType ?? this.geometryType,
       coordinates: coordinates ?? this.coordinates,
+      multiCoordinates: multiCoordinates ?? this.multiCoordinates,
       touchesTileBoundary: touchesTileBoundary ?? this.touchesTileBoundary,
       candidateNeighborOffsets:
           candidateNeighborOffsets ?? this.candidateNeighborOffsets,
