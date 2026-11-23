@@ -86,6 +86,9 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
+
+  /// Keeps the FlutterMap state (tiles, controller) across globe transitions.
+  final GlobalKey _flutterMapKey = GlobalKey();
   final GlobalKey<GeoInteractiveLayerState> _interactiveKey = GlobalKey();
   final GeoSelectionController _selectionController =
       GeoSelectionController(multiSelect: false);
@@ -298,27 +301,78 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Planar footprint area in m². Signed ring areas are summed so holes
+  /// (opposite winding) subtract and stitched tile pieces add up.
   double _calculateArea(List<List<gq.LatLng>> coordinates) {
-    if (coordinates.isEmpty) return 0.0;
-    final outer = coordinates.first;
-    if (outer.length < 3) return 0.0;
+    if (coordinates.isEmpty || coordinates.first.length < 3) return 0.0;
 
-    double area = 0.0;
-    final n = outer.length;
-    final centerLat = outer.first.latitude;
+    final centerLat = coordinates.first.first.latitude;
     const metersPerDegreeLat = 111320.0;
     final metersPerDegreeLng =
         111320.0 * math.cos(centerLat * math.pi / 180.0);
 
-    for (var i = 0; i < n; i++) {
-      final j = (i + 1) % n;
-      final xi = outer[i].longitude * metersPerDegreeLng;
-      final yi = outer[i].latitude * metersPerDegreeLat;
-      final xj = outer[j].longitude * metersPerDegreeLng;
-      final yj = outer[j].latitude * metersPerDegreeLat;
-      area += (xi * yj) - (xj * yi);
+    double total = 0.0;
+    for (final ring in coordinates) {
+      if (ring.length < 3) continue;
+      double area = 0.0;
+      for (var i = 0; i < ring.length; i++) {
+        final j = (i + 1) % ring.length;
+        final xi = ring[i].longitude * metersPerDegreeLng;
+        final yi = ring[i].latitude * metersPerDegreeLat;
+        final xj = ring[j].longitude * metersPerDegreeLng;
+        final yj = ring[j].latitude * metersPerDegreeLat;
+        area += (xi * yj) - (xj * yi);
+      }
+      total += area / 2.0;
     }
-    return (area.abs() / 2.0);
+    return total.abs();
+  }
+
+  /// Length in meters of a closed [ring].
+  double _calculatePerimeter(List<gq.LatLng> ring) {
+    if (ring.length < 2) return 0.0;
+    double length = 0.0;
+    for (var i = 0; i < ring.length; i++) {
+      length += ring[i].distanceTo(ring[(i + 1) % ring.length]);
+    }
+    return length;
+  }
+
+  /// Building height in meters, or `null` when the data has none.
+  double? _heightOf(gq.GeoFeature feature) {
+    final raw = feature['height'];
+    final value = raw is num ? raw.toDouble() : double.tryParse('$raw');
+    return value != null && value > 0 ? value : null;
+  }
+
+  String _formatMeters(double value) => value == value.roundToDouble()
+      ? value.toStringAsFixed(0)
+      : value.toStringAsFixed(1);
+
+  static const _kindNames = <String, (String es, String en)>{
+    'building': ('Edificio', 'Building'),
+    'building_part': ('Parte de edificio', 'Building part'),
+    'residential': ('Residencial', 'Residential'),
+    'apartments': ('Apartamentos', 'Apartments'),
+    'house': ('Casa', 'House'),
+    'commercial': ('Comercial', 'Commercial'),
+    'retail': ('Comercio', 'Retail'),
+    'office': ('Oficinas', 'Office'),
+    'industrial': ('Industrial', 'Industrial'),
+    'school': ('Colegio', 'School'),
+    'university': ('Universidad', 'University'),
+    'hospital': ('Hospital', 'Hospital'),
+    'church': ('Iglesia', 'Church'),
+  };
+
+  /// Readable name for a feature `kind` value.
+  String _kindLabel(dynamic kind) {
+    final raw = (kind ?? 'building').toString().trim();
+    final known = _kindNames[raw.toLowerCase()];
+    if (known != null) return _isSpanish ? known.$1 : known.$2;
+    if (raw.isEmpty) return _isSpanish ? 'Edificio' : 'Building';
+    final words = raw.replaceAll('_', ' ');
+    return words[0].toUpperCase() + words.substring(1);
   }
 
   List<Polyline> _buildTileGridPolylines() {
@@ -475,16 +529,16 @@ class _MapScreenState extends State<MapScreen> {
 
           // Tile Grid Toggle
           IconButton(
-            tooltip: _isSpanish
-                ? 'Líneas de tesela'
-                : 'Toggle Tile Grid Lines',
+            tooltip: _isSpanish ? 'Mostrar cuadrícula' : 'Show grid',
             icon: Icon(_showTileGrid ? Icons.grid_on : Icons.grid_off),
             onPressed: () => setState(() => _showTileGrid = !_showTileGrid),
           ),
 
           // Sample Building
           IconButton(
-            tooltip: _isSpanish ? 'Edificio de ejemplo' : 'Sample Building',
+            tooltip: _isSpanish
+                ? 'Ver un edificio entre zonas'
+                : 'Show a building across zones',
             icon: const Icon(Icons.crop_free),
             onPressed: _jumpToBorderBuilding,
           ),
@@ -520,6 +574,14 @@ class _MapScreenState extends State<MapScreen> {
                       borderRadius: BorderRadius.circular(targetRadius),
                       boxShadow: globeFactor > 0.05
                           ? [
+                              // Atmosphere rim (tight, bright)
+                              BoxShadow(
+                                color: const Color(0xFF7DD3FC).withValues(
+                                  alpha: 0.5 * globeFactor,
+                                ),
+                                blurRadius: 14 * globeFactor,
+                                spreadRadius: 1.5 * globeFactor,
+                              ),
                               // Atmosphere glow
                               BoxShadow(
                                 color: Colors.cyanAccent.withValues(
@@ -539,172 +601,181 @@ class _MapScreenState extends State<MapScreen> {
                             ]
                           : null,
                     ),
-                    clipBehavior:
-                        globeFactor > 0.02 ? Clip.antiAlias : Clip.none,
-                    child: Transform(
-                      alignment: Alignment.center,
-                      transform: Matrix4.identity()
-                        ..setEntry(3, 2, 0.001) // 3D Perspective
-                        ..rotateX(0.12 * globeFactor), // Subtle tilt
-                      child: Stack(
-                        children: [
-                          FlutterMap(
-                            mapController: _mapController,
-                            options: MapOptions(
-                              initialCenter: _currentRegion.center,
-                              initialZoom: _currentZoom,
-                              maxZoom: 18.0,
-                              minZoom: 1.5, // Total zoom out enabled
-                              onPositionChanged: (camera, hasGesture) {
-                                if ((camera.zoom - _currentZoom).abs() >
-                                    0.05) {
-                                  setState(() => _currentZoom = camera.zoom);
-                                }
-                              },
-                              onTap: (_, point) => _onMapTap(point),
+                    // Always clip: toggling clipBehavior inserts/removes a
+                    // ClipPath and would remount FlutterMap.
+                    clipBehavior: Clip.antiAlias,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // Tilt the map content only, scaled up so the tilted
+                        // edges never reveal the background inside the clip.
+                        Transform(
+                          alignment: Alignment.center,
+                          transform: Matrix4.identity()
+                            ..setEntry(3, 2, 0.001) // 3D Perspective
+                            ..rotateX(0.12 * globeFactor) // Subtle tilt
+                            ..scaleByDouble(
+                              1 + 0.08 * globeFactor,
+                              1 + 0.08 * globeFactor,
+                              1,
+                              1,
                             ),
+                          child: Stack(
                             children: [
-                              // 1.1 Base Map Raster Layer
-                              TileLayer(
-                                urlTemplate:
-                                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                                userAgentPackageName:
-                                    'co.churtech.dart_geoquery',
-                                tileProvider: NetworkTileProvider(
-                                  headers: {
-                                    'User-Agent':
-                                        'DartGeoQueryDemo/1.0.0 (contact@churtech.com)',
+                              FlutterMap(
+                                key: _flutterMapKey,
+                                mapController: _mapController,
+                                options: MapOptions(
+                                  initialCenter: _currentRegion.center,
+                                  initialZoom: _currentZoom,
+                                  maxZoom: 18.0,
+                                  minZoom: 1.5, // Total zoom out enabled
+                                  onPositionChanged: (camera, hasGesture) {
+                                    if ((camera.zoom - _currentZoom).abs() >
+                                        0.05) {
+                                      setState(() => _currentZoom = camera.zoom);
+                                    }
                                   },
-                                  cachingProvider:
-                                      const DisabledMapCachingProvider(),
+                                  onTap: (_, point) => _onMapTap(point),
                                 ),
-                              ),
-
-                              // 1.2 Debug Tile Grid Layer
-                              if (_showTileGrid)
-                                PolylineLayer(
-                                  polylines: _buildTileGridPolylines(),
-                                ),
-
-                              // 1.3 User GPS Location Layer (Pulsing Dot + Accuracy Halo)
-                              if (_myLocation != null) ...[
-                                if (_myAccuracyMeters != null &&
-                                    _myAccuracyMeters! > 5)
-                                  CircleLayer(
-                                    circles: [
-                                      CircleMarker(
-                                        point: _myLocation!,
-                                        radius: (_myAccuracyMeters! * 0.75)
-                                            .clamp(12.0, 100.0),
-                                        useRadiusInMeter: false,
-                                        color:
-                                            Colors.blue.withValues(alpha: 0.12),
-                                        borderColor: Colors.blueAccent
-                                            .withValues(alpha: 0.35),
-                                        borderStrokeWidth: 1.5,
-                                      ),
-                                    ],
+                                children: [
+                                  // 1.1 Base Map Raster Layer
+                                  TileLayer(
+                                    urlTemplate:
+                                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                    userAgentPackageName:
+                                        'co.churtech.dart_geoquery',
+                                    tileProvider: NetworkTileProvider(
+                                      headers: {
+                                        'User-Agent':
+                                            'DartGeoQueryDemo/1.0.0 (contact@churtech.com)',
+                                      },
+                                      cachingProvider:
+                                          const DisabledMapCachingProvider(),
+                                    ),
                                   ),
-                                MarkerLayer(
-                                  markers: [
-                                    Marker(
-                                      point: _myLocation!,
-                                      width: 44,
-                                      height: 44,
-                                      child: Stack(
-                                        alignment: Alignment.center,
-                                        children: [
-                                          Container(
-                                            width: 28,
-                                            height: 28,
-                                            decoration: BoxDecoration(
-                                              shape: BoxShape.circle,
-                                              color: Colors.blue
-                                                  .withValues(alpha: 0.25),
-                                            ),
-                                          ),
-                                          Container(
-                                            width: 16,
-                                            height: 16,
-                                            decoration: BoxDecoration(
-                                              shape: BoxShape.circle,
-                                              color: Colors.blue.shade600,
-                                              border: Border.all(
-                                                  color: Colors.white,
-                                                  width: 3),
-                                              boxShadow: const [
-                                                BoxShadow(
-                                                  color: Colors.black38,
-                                                  blurRadius: 6,
-                                                  offset: Offset(0, 2),
-                                                ),
-                                              ],
-                                            ),
+
+                                  // 1.2 Debug Tile Grid Layer
+                                  if (_showTileGrid)
+                                    PolylineLayer(
+                                      polylines: _buildTileGridPolylines(),
+                                    ),
+
+                                  // 1.3 User GPS Location Layer (Pulsing Dot + Accuracy Halo)
+                                  if (_myLocation != null) ...[
+                                    if (_myAccuracyMeters != null &&
+                                        _myAccuracyMeters! > 5)
+                                      CircleLayer(
+                                        circles: [
+                                          CircleMarker(
+                                            point: _myLocation!,
+                                            radius: (_myAccuracyMeters! * 0.75)
+                                                .clamp(12.0, 100.0),
+                                            useRadiusInMeter: false,
+                                            color:
+                                                Colors.blue.withValues(alpha: 0.12),
+                                            borderColor: Colors.blueAccent
+                                                .withValues(alpha: 0.35),
+                                            borderStrokeWidth: 1.5,
                                           ),
                                         ],
                                       ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-
-                              // 1.4 Interactive Vector Selection Layer
-                              if (_geoQuery != null)
-                                GeoInteractiveLayer(
-                                  key: _interactiveKey,
-                                  query: _geoQuery!,
-                                  layer: 'buildings',
-                                  idKey: _currentRegion ==
-                                          DemoRegion.wellington
-                                      ? 'building_i'
-                                      : 'id',
-                                  controller: _selectionController,
-                                  stitchBoundaries: true,
-                                  selectedStyle: (feature) => PolygonStyle(
-                                    color: Colors.teal
-                                        .withValues(alpha: 0.45),
-                                    borderColor: Colors.teal.shade800,
-                                    borderStrokeWidth: 2.5,
-                                    label: feature['town_city'] != null
-                                        ? '${feature['suburb_loc'] ?? ''}'
-                                        : null,
-                                    labelStyle: const TextStyle(
-                                      color: Colors.black87,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-
-                          // 1.4 Spherical Curvature & Limb Darkening (Only visible when zoomed out)
-                          if (globeFactor > 0.05)
-                            Positioned.fill(
-                              child: IgnorePointer(
-                                child: Container(
-                                  decoration: BoxDecoration(
-                                    gradient: RadialGradient(
-                                      colors: [
-                                        Colors.transparent,
-                                        Colors.transparent,
-                                        Colors.black.withValues(
-                                          alpha: 0.5 * globeFactor,
+                                    MarkerLayer(
+                                      markers: [
+                                        Marker(
+                                          point: _myLocation!,
+                                          width: 44,
+                                          height: 44,
+                                          child: Stack(
+                                            alignment: Alignment.center,
+                                            children: [
+                                              Container(
+                                                width: 28,
+                                                height: 28,
+                                                decoration: BoxDecoration(
+                                                  shape: BoxShape.circle,
+                                                  color: Colors.blue
+                                                      .withValues(alpha: 0.25),
+                                                ),
+                                              ),
+                                              Container(
+                                                width: 16,
+                                                height: 16,
+                                                decoration: BoxDecoration(
+                                                  shape: BoxShape.circle,
+                                                  color: Colors.blue.shade600,
+                                                  border: Border.all(
+                                                      color: Colors.white,
+                                                      width: 3),
+                                                  boxShadow: const [
+                                                    BoxShadow(
+                                                      color: Colors.black38,
+                                                      blurRadius: 6,
+                                                      offset: Offset(0, 2),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
                                       ],
-                                      stops: const [0.0, 0.70, 1.0],
                                     ),
-                                  ),
-                                ),
+                                  ],
+
+                                  // 1.4 Interactive Vector Selection Layer
+                                  if (_geoQuery != null)
+                                    GeoInteractiveLayer(
+                                      key: _interactiveKey,
+                                      query: _geoQuery!,
+                                      layer: 'buildings',
+                                      idKey: _currentRegion ==
+                                              DemoRegion.wellington
+                                          ? 'building_i'
+                                          : 'id',
+                                      controller: _selectionController,
+                                      stitchBoundaries: true,
+                                      extrude: true,
+                                      heightKey: 'height',
+                                      selectedStyle: (feature) => PolygonStyle(
+                                        color: Colors.teal
+                                            .withValues(alpha: 0.45),
+                                        borderColor: Colors.teal.shade800,
+                                        borderStrokeWidth: 2.5,
+                                        label: feature['town_city'] != null
+                                            ? '${feature['suburb_loc'] ?? ''}'
+                                            : null,
+                                        labelStyle: const TextStyle(
+                                          color: Colors.black87,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                ],
                               ),
+                            ],
+                          ),
+                        ),
+
+                        // 1.5 Sphere lighting inside the same clip: highlight
+                        // top-left, limb darkening on the real edge.
+                        // Always mounted so the tree shape never changes with
+                        // globeFactor; it paints nothing when flat.
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: _GlobeLighting(
+                              factor: globeFactor,
+                              radius: targetRadius,
                             ),
-                        ],
-                      ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
 
-                // Top Latency & Zoom Pill
+                // Top Response & Zoom Pill
                 Positioned(
                   top: 16,
                   left: 16,
@@ -745,7 +816,7 @@ class _MapScreenState extends State<MapScreen> {
                               ? (_isSpanish
                                   ? 'Consultando Isolate...'
                                   : 'Querying Isolate...')
-                              : '${_isSpanish ? 'Latencia' : 'Latency'}: ${_lastQueryLatencyMs}ms | Zoom: ${_currentZoom.toStringAsFixed(1)}',
+                              : '${_isSpanish ? 'Respuesta' : 'Response'}: $_lastQueryLatencyMs ms | Zoom: ${_currentZoom.toStringAsFixed(1)}',
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
@@ -816,7 +887,7 @@ class _MapScreenState extends State<MapScreen> {
                         tooltip: _isSpanish ? 'Vista Globo 3D' : '3D Globe View',
                         backgroundColor: Colors.teal.shade50,
                         onPressed: () {
-                          _mapController.move(_currentRegion.center, 1.8);
+                          _mapController.move(_currentRegion.center, 1.5);
                         },
                         child: const Icon(Icons.public, color: Colors.teal),
                       ),
@@ -889,10 +960,10 @@ class _MapScreenState extends State<MapScreen> {
                                             Text(
                                               _currentRegion ==
                                                       DemoRegion.wellington
-                                                  ? 'Building ID: ${_selectedFeature!['building_i']}'
-                                                  : (_isSpanish
-                                                      ? 'Edificio (${_selectedFeature!['kind'] ?? 'General'})'
-                                                      : 'Building (${_selectedFeature!['kind'] ?? 'General'})'),
+                                                  ? '${_isSpanish ? 'Edificio' : 'Building'} #${_selectedFeature!['building_i']}'
+                                                  : _kindLabel(
+                                                      _selectedFeature!['kind'],
+                                                    ),
                                               style: const TextStyle(
                                                 fontSize: 16,
                                                 fontWeight: FontWeight.bold,
@@ -927,7 +998,32 @@ class _MapScreenState extends State<MapScreen> {
                                   ),
                                   const Divider(height: 18),
 
-                                  // Feature Chips
+                                  // Primary metric: footprint area
+                                  if (_selectedFeature!.coordinates !=
+                                          null &&
+                                      _selectedFeature!
+                                          .coordinates!.isNotEmpty) ...[
+                                    Text(
+                                      _isSpanish
+                                          ? 'Área aprox.'
+                                          : 'Approx. area',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade600,
+                                      ),
+                                    ),
+                                    Text(
+                                      '${_calculateArea(_selectedFeature!.coordinates!).toStringAsFixed(0)} m²',
+                                      style: const TextStyle(
+                                        fontSize: 26,
+                                        fontWeight: FontWeight.bold,
+                                        height: 1.1,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 10),
+                                  ],
+
+                                  // Secondary metrics
                                   Wrap(
                                     spacing: 8,
                                     runSpacing: 6,
@@ -952,67 +1048,58 @@ class _MapScreenState extends State<MapScreen> {
                                           _isSpanish ? 'Uso' : 'Use',
                                           _selectedFeature!['use'],
                                         ),
-                                      ] else ...[
-                                        _buildChip(
-                                          _isSpanish ? 'Tipo' : 'Kind',
-                                          _selectedFeature!['kind'] ??
-                                              'building',
-                                        ),
+                                      ],
+                                      if (_heightOf(_selectedFeature!)
+                                          case final height?) ...[
                                         _buildChip(
                                           _isSpanish ? 'Altura' : 'Height',
-                                          _selectedFeature!['height'] != null
-                                              ? '${_selectedFeature!['height']} m'
-                                              : null,
+                                          '${_formatMeters(height)} m',
                                         ),
                                         _buildChip(
                                           _isSpanish
-                                              ? 'Alt. Mínima'
-                                              : 'Min Height',
-                                          _selectedFeature!['min_height'] !=
-                                                  null
-                                              ? '${_selectedFeature!['min_height']} m'
-                                              : null,
-                                        ),
-                                        _buildChip(
-                                          'Rank',
-                                          _selectedFeature!['sort_rank'],
+                                              ? 'Pisos aprox.'
+                                              : 'Approx. floors',
+                                          math.max(1, (height / 3).round()),
                                         ),
                                       ],
-
-                                      // Calculated Area Chip
-                                      if (_selectedFeature!.coordinates !=
+                                      _buildChip(
+                                        _isSpanish
+                                            ? 'Alt. mínima'
+                                            : 'Min. height',
+                                        _selectedFeature!['min_height'] !=
+                                                null
+                                            ? '${_selectedFeature!['min_height']} m'
+                                            : null,
+                                      ),
+                                      // Perimeter of a single-tile outline;
+                                      // stitched pieces would count tile seams.
+                                      if (_selectedFeature!.tileCount == 1 &&
+                                          _selectedFeature!.coordinates !=
                                               null &&
                                           _selectedFeature!
                                               .coordinates!.isNotEmpty)
                                         _buildChip(
                                           _isSpanish
-                                              ? 'Área aprox.'
-                                              : 'Approx. Area',
-                                          '${_calculateArea(_selectedFeature!.coordinates!).toStringAsFixed(0)} m²',
-                                          color: Colors.amber.shade50,
-                                          borderColor: Colors.amber.shade300,
+                                              ? 'Perímetro'
+                                              : 'Perimeter',
+                                          '${_calculatePerimeter(_selectedFeature!.coordinates!.first).toStringAsFixed(0)} m',
                                         ),
-
-                                      // Stitched Status Chip
                                       _buildChip(
-                                        _isSpanish
-                                            ? 'Costura de tesela'
-                                            : 'Tile Boundary',
-                                        _selectedFeature!.touchesTileBoundary
+                                        _isSpanish ? 'Forma' : 'Shape',
+                                        _selectedFeature!.tileCount == 1
                                             ? (_isSpanish
-                                                ? 'Cosido (Multi-tesela)'
-                                                : 'Stitched (Multi-tile)')
+                                                ? 'completa'
+                                                : 'complete')
                                             : (_isSpanish
-                                                ? 'En una sola tesela'
-                                                : 'Self-contained'),
-                                        color: _selectedFeature!
-                                                .touchesTileBoundary
+                                                ? 'unida de ${_selectedFeature!.tileCount} partes'
+                                                : 'joined from ${_selectedFeature!.tileCount} parts'),
+                                        color: _selectedFeature!.tileCount > 1
                                             ? Colors.green.shade50
                                             : Colors.blue.shade50,
-                                        borderColor: _selectedFeature!
-                                                .touchesTileBoundary
-                                            ? Colors.green.shade300
-                                            : Colors.blue.shade300,
+                                        borderColor:
+                                            _selectedFeature!.tileCount > 1
+                                                ? Colors.green.shade300
+                                                : Colors.blue.shade300,
                                       ),
                                     ],
                                   ),
@@ -1039,11 +1126,11 @@ class _MapScreenState extends State<MapScreen> {
                                           Text(
                                             _isSpanish
                                                 ? (_showRawJson
-                                                    ? 'Ocultar atributos PMTiles'
-                                                    : 'Ver atributos completos PMTiles (${_selectedFeature!.properties.length})')
+                                                    ? 'Ocultar datos'
+                                                    : 'Ver todos los datos (${_selectedFeature!.properties.length})')
                                                 : (_showRawJson
-                                                    ? 'Hide PMTiles attributes'
-                                                    : 'View full PMTiles attributes (${_selectedFeature!.properties.length})'),
+                                                    ? 'Hide data'
+                                                    : 'Show all data (${_selectedFeature!.properties.length})'),
                                             style: TextStyle(
                                               fontSize: 12,
                                               fontWeight: FontWeight.w600,
@@ -1150,4 +1237,76 @@ class _MapScreenState extends State<MapScreen> {
       ),
     );
   }
+}
+
+/// Sphere shading for the low-zoom globe: a soft highlight towards the
+/// top-left light source and limb darkening along the clipped edge.
+///
+/// Must be placed inside the globe's clip so it shares its exact shape.
+class _GlobeLighting extends StatelessWidget {
+  const _GlobeLighting({required this.factor, required this.radius});
+
+  /// Globe interpolation factor (0 = flat map, 1 = full globe).
+  final double factor;
+
+  /// Corner radius of the clipped globe container.
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _LimbPainter(factor: factor, radius: radius),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: const Alignment(-0.45, -0.5),
+            radius: 0.9,
+            colors: [
+              Colors.white.withValues(alpha: 0.28 * factor),
+              Colors.white.withValues(alpha: 0.07 * factor),
+              Colors.white.withValues(alpha: 0.0),
+            ],
+            stops: const [0.0, 0.35, 0.8],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Darkens a band along the container's rounded edge. The stroke is centered
+/// on the edge and blurred; the parent clip keeps only its inner half.
+class _LimbPainter extends CustomPainter {
+  const _LimbPainter({required this.factor, required this.radius});
+
+  final double factor;
+  final double radius;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (factor <= 0) return;
+    final rrect = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      Radius.circular(radius),
+    );
+    final band = size.shortestSide * 0.16;
+
+    void stroke(double width, double alpha) {
+      canvas.drawRRect(
+        rrect,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = width
+          ..color = Colors.black.withValues(alpha: alpha * factor)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, width * 0.35),
+      );
+    }
+
+    stroke(band * 2.4, 0.25); // wide, soft falloff
+    stroke(band, 0.45); // dark limb right at the edge
+  }
+
+  @override
+  bool shouldRepaint(_LimbPainter oldDelegate) =>
+      oldDelegate.factor != factor || oldDelegate.radius != radius;
 }
