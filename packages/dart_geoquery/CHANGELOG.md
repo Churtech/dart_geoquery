@@ -1,3 +1,8 @@
+## 1.0.1
+
+* Fixed isolate tile cache desync: after the worker's LRU cache evicted a tile, later queries on that tile silently returned no results. The worker now reports a cache miss and `GeoQuery` reloads the tile bytes and retries once.
+* `stitchFeature` no longer throws when a neighboring tile does not exist in the archive.
+
 ## 1.0.0
 
 * Initial release of `dart_geoquery`.

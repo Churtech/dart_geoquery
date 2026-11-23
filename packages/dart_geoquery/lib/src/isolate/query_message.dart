@@ -82,10 +82,24 @@ class PointQueryResponse {
   final int requestId;
   final List<GeoFeatureDto> features;
 
+  /// True when the request carried no tile bytes and the worker no longer
+  /// holds the tile (e.g. it was evicted from its LRU cache).
+  final bool cacheMiss;
+
   const PointQueryResponse({
     required this.requestId,
     required this.features,
+    this.cacheMiss = false,
   });
+}
+
+/// Thrown by the worker client when the worker does not hold a tile and the
+/// request did not include its bytes. The caller must resend with bytes.
+class TileCacheMissException implements Exception {
+  const TileCacheMissException();
+
+  @override
+  String toString() => 'TileCacheMissException: worker tile cache miss';
 }
 
 /// Command to terminate the worker isolate cleanly.

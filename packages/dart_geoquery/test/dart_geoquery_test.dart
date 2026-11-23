@@ -433,4 +433,31 @@ void main() {
       query.close();
     });
   });
+
+  group('Isolate tile cache', () {
+    test('re-sends tile bytes after the worker evicts a tile', () async {
+      // Capacity 1 forces the worker to evict the first tile as soon as a
+      // second tile is queried.
+      final query = await GeoQuery.open(
+        '../../bogota.pmtiles',
+        useIsolate: true,
+        cacheCapacity: 1,
+      );
+      addTearDown(query.close);
+
+      const pointA = LatLng(4.67098, -74.05507);
+      // ~5.5 km east: a different tile at any zoom used by the buildings layer.
+      const pointB = LatLng(4.67098, -74.00507);
+
+      final first = await query.at(pointA, layer: 'buildings');
+      expect(first, isNotNull);
+
+      await query.at(pointB, layer: 'buildings'); // evicts tile of pointA
+
+      final again = await query.at(pointA, layer: 'buildings');
+      expect(again, isNotNull,
+          reason: 'evicted tile must be re-sent to the worker, not dropped');
+      expect(again!.id, equals(first!.id));
+    });
+  });
 }

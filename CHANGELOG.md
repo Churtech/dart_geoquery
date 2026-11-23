@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-11-23
+
+### Fixed
+
+#### `dart_geoquery` (v1.0.1)
+- Isolate tile cache desync: once the worker's LRU cache evicted a tile, queries on that tile silently returned no results. The worker now reports a cache miss and the tile bytes are reloaded and resent.
+- `stitchFeature` no longer throws when a neighboring tile is missing from the archive.
+
 ## [1.0.0] - 2026-11-19
 
 ### Added

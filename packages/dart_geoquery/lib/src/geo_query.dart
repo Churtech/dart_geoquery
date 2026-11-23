@@ -6,6 +6,7 @@ import 'package:pmtiles/pmtiles.dart';
 import 'package:vector_tile/vector_tile.dart';
 
 import 'isolate/isolate_query_worker.dart';
+import 'isolate/query_message.dart';
 import 'models/geo_feature.dart';
 import 'models/lat_lng.dart';
 import 'spatial/point_in_polygon.dart';
@@ -169,32 +170,25 @@ class GeoQuery {
 
     // If long-lived isolate worker is enabled, offload decoding & PIP
     if (_worker != null) {
-      Uint8List? bytesToSend;
-      if (!_workerCachedTileIds.contains(tileId)) {
-        try {
-          final tile = await _archive.tile(tileId);
-          final rawBytes = tile.bytes();
-          if (rawBytes.isEmpty) return const [];
-
-          bytesToSend = rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
-          _workerCachedTileIds.add(tileId);
-        } on TileNotFoundException {
-          return const [];
-        } catch (_) {
-          return const [];
-        }
+      final worker = _worker;
+      late final List<GeoFeatureDto> dtos;
+      try {
+        dtos = await _runOnWorker(
+          tileId,
+          (tileBytes) => worker.queryPoint(
+            tileId: tileId,
+            tileX: tileX,
+            tileY: tileY,
+            zoom: targetZoom,
+            localX: localX,
+            localY: localY,
+            layer: layer,
+            tileBytes: tileBytes,
+          ),
+        );
+      } catch (_) {
+        return const [];
       }
-
-      final dtos = await _worker.queryPoint(
-        tileId: tileId,
-        tileX: tileX,
-        tileY: tileY,
-        zoom: targetZoom,
-        localX: localX,
-        localY: localY,
-        layer: layer,
-        tileBytes: bytesToSend,
-      );
 
       return dtos.map((d) {
         final rings = d.coordinates
@@ -357,27 +351,20 @@ class GeoQuery {
         visitedTiles.add((nx, ny));
         final neighborTileId = ZXY(zoom, nx, ny).toTileId();
 
-        Uint8List? bytesToSend;
-        if (!_workerCachedTileIds.contains(neighborTileId)) {
-          final nTile = await _archive.tile(neighborTileId);
-          final rawBytes = nTile.bytes();
-          if (rawBytes.isNotEmpty) {
-            bytesToSend =
-                rawBytes is Uint8List ? rawBytes : Uint8List.fromList(rawBytes);
-            _workerCachedTileIds.add(neighborTileId);
-          }
-        }
-
-        if (_worker != null) {
-          final dtos = await _worker.fetchFeatureById(
-            tileId: neighborTileId,
-            tileX: nx,
-            tileY: ny,
-            zoom: zoom,
-            layer: feature.layer,
-            idKey: idKey,
-            idValue: idValue,
-            tileBytes: bytesToSend,
+        final worker = _worker;
+        if (worker != null) {
+          final dtos = await _runOnWorker(
+            neighborTileId,
+            (tileBytes) => worker.fetchFeatureById(
+              tileId: neighborTileId,
+              tileX: nx,
+              tileY: ny,
+              zoom: zoom,
+              layer: feature.layer,
+              idKey: idKey,
+              idValue: idValue,
+              tileBytes: tileBytes,
+            ),
           );
 
           for (final dto in dtos) {
@@ -521,6 +508,44 @@ class GeoQuery {
   /// Closes the background isolate and releases resources.
   void close() {
     _worker?.close();
+  }
+
+  /// Sends a request to the worker, attaching tile bytes only when the worker
+  /// is not believed to hold the tile. If the worker reports a cache miss
+  /// (it evicted the tile from its LRU), the bytes are reloaded and the
+  /// request is retried once.
+  Future<List<GeoFeatureDto>> _runOnWorker(
+    int tileId,
+    Future<List<GeoFeatureDto>> Function(Uint8List? tileBytes) send,
+  ) async {
+    Uint8List? bytes;
+    if (!_workerCachedTileIds.contains(tileId)) {
+      bytes = await _loadTileBytes(tileId);
+      if (bytes == null) return const [];
+      _workerCachedTileIds.add(tileId);
+    }
+
+    try {
+      return await send(bytes);
+    } on TileCacheMissException {
+      _workerCachedTileIds.remove(tileId);
+      final fresh = await _loadTileBytes(tileId);
+      if (fresh == null) return const [];
+      _workerCachedTileIds.add(tileId);
+      return send(fresh);
+    }
+  }
+
+  /// Loads raw tile bytes, or `null` if the tile is missing or empty.
+  Future<Uint8List?> _loadTileBytes(int tileId) async {
+    try {
+      final tile = await _archive.tile(tileId);
+      final raw = tile.bytes();
+      if (raw.isEmpty) return null;
+      return raw is Uint8List ? raw : Uint8List.fromList(raw);
+    } on TileNotFoundException {
+      return null;
+    }
   }
 
   bool _testFeatureContainsPoint(

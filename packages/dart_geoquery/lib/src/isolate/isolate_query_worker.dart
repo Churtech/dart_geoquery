@@ -72,7 +72,12 @@ class IsolateQueryWorker {
     _receivePort.listen((message) {
       if (message is PointQueryResponse) {
         final completer = _pendingRequests.remove(message.requestId);
-        completer?.complete(message.features);
+        if (completer == null) return;
+        if (message.cacheMiss) {
+          completer.completeError(const TileCacheMissException());
+        } else {
+          completer.complete(message.features);
+        }
       }
     });
   }
@@ -196,13 +201,15 @@ class IsolateQueryWorker {
         final results = _handlePointQuery(message, tileCache);
         replyPort?.send(PointQueryResponse(
           requestId: message.requestId,
-          features: results,
+          features: results ?? const [],
+          cacheMiss: results == null,
         ));
       } else if (message is FetchFeatureByIdRequest) {
         final results = _handleFetchById(message, tileCache);
         replyPort?.send(PointQueryResponse(
           requestId: message.requestId,
-          features: results,
+          features: results ?? const [],
+          cacheMiss: results == null,
         ));
       }
     });
@@ -303,7 +310,8 @@ class IsolateQueryWorker {
     return offsets;
   }
 
-  static List<GeoFeatureDto> _handlePointQuery(
+  /// Returns `null` on a cache miss (tile not held and no bytes supplied).
+  static List<GeoFeatureDto>? _handlePointQuery(
     PointQueryRequest req,
     LruCache<int, _CachedTile> cache,
   ) {
@@ -316,7 +324,7 @@ class IsolateQueryWorker {
       cache: cache,
     );
 
-    if (cached == null) return const [];
+    if (cached == null) return req.tileBytes == null ? null : const [];
 
     final matches = <GeoFeatureDto>[];
     final px = req.localX;
@@ -416,7 +424,8 @@ class IsolateQueryWorker {
     return matches;
   }
 
-  static List<GeoFeatureDto> _handleFetchById(
+  /// Returns `null` on a cache miss (tile not held and no bytes supplied).
+  static List<GeoFeatureDto>? _handleFetchById(
     FetchFeatureByIdRequest req,
     LruCache<int, _CachedTile> cache,
   ) {
@@ -429,7 +438,7 @@ class IsolateQueryWorker {
       cache: cache,
     );
 
-    if (cached == null) return const [];
+    if (cached == null) return req.tileBytes == null ? null : const [];
 
     final matches = <GeoFeatureDto>[];
 
