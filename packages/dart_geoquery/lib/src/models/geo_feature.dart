@@ -29,6 +29,14 @@ class GeoFeature {
   /// The tile coordinate `(x, y, z)` where this feature was located.
   final (int x, int y, int z)? sourceTile;
 
+  /// Number of tiles whose geometry contributed to this feature.
+  ///
+  /// `1` for a feature read from a single tile. After
+  /// [GeoQuery.stitchFeature] it counts the source tile plus every
+  /// neighboring tile that returned matching parts, so a value greater than
+  /// `1` means the geometry was joined from several tile pieces.
+  final int tileCount;
+
   const GeoFeature({
     this.id,
     required this.layer,
@@ -39,6 +47,7 @@ class GeoFeature {
     this.touchesTileBoundary = false,
     this.candidateNeighborOffsets = const [],
     this.sourceTile,
+    this.tileCount = 1,
   });
 
   /// Convenient access to feature attributes, e.g. `feature['name']`.
@@ -61,6 +70,7 @@ class GeoFeature {
     bool? touchesTileBoundary,
     List<(int dx, int dy)>? candidateNeighborOffsets,
     (int x, int y, int z)? sourceTile,
+    int? tileCount,
   }) {
     return GeoFeature(
       id: id ?? this.id,
@@ -73,10 +83,11 @@ class GeoFeature {
       candidateNeighborOffsets:
           candidateNeighborOffsets ?? this.candidateNeighborOffsets,
       sourceTile: sourceTile ?? this.sourceTile,
+      tileCount: tileCount ?? this.tileCount,
     );
   }
 
   @override
   String toString() =>
-      'GeoFeature(id: $id, layer: $layer, geometryType: $geometryType, touchesBoundary: $touchesTileBoundary, properties: $properties)';
+      'GeoFeature(id: $id, layer: $layer, geometryType: $geometryType, touchesBoundary: $touchesTileBoundary, tileCount: $tileCount, properties: $properties)';
 }

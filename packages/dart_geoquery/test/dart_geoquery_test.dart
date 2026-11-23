@@ -434,6 +434,57 @@ void main() {
     });
   });
 
+  group('Boundary stitching', () {
+    test('GeoFeature defaults tileCount to 1 and copyWith overrides it', () {
+      const feature = GeoFeature(
+        layer: 'buildings',
+        properties: {},
+        geometryType: 'Polygon',
+      );
+      expect(feature.tileCount, equals(1));
+      expect(feature.copyWith(tileCount: 3).tileCount, equals(3));
+    });
+
+    test('stitched building reports tileCount > 1', () async {
+      final query = await GeoQuery.open('../../bogota.pmtiles', useIsolate: true);
+      addTearDown(query.close);
+
+      // Building clipped by the east edge of tile (4821, 7979, 14).
+      // Bogota buildings are merged per tile and their feature ids differ
+      // across tiles, so the shared 'height' attribute is used as join key.
+      const point = LatLng(4.6635, -74.04788156);
+      final raw = await query.at(point, layer: 'buildings');
+      expect(raw, isNotNull);
+      expect(raw!.touchesTileBoundary, isTrue);
+      expect(raw.tileCount, equals(1));
+
+      final stitched = await query.at(
+        point,
+        layer: 'buildings',
+        stitchBoundaries: true,
+        idKey: 'height',
+      );
+      expect(stitched, isNotNull);
+      expect(stitched!.tileCount, greaterThan(1));
+      expect(stitched.touchesTileBoundary, isFalse);
+      expect(stitched.coordinates!.length,
+          greaterThan(raw.coordinates!.length));
+    });
+
+    test('self-contained building keeps tileCount == 1 when stitching',
+        () async {
+      final query = await GeoQuery.open('../../bogota.pmtiles', useIsolate: true);
+      addTearDown(query.close);
+
+      const point = LatLng(4.67098, -74.05507);
+      final feature =
+          await query.at(point, layer: 'buildings', stitchBoundaries: true);
+      expect(feature, isNotNull);
+      expect(feature!.touchesTileBoundary, isFalse);
+      expect(feature.tileCount, equals(1));
+    });
+  });
+
   group('Isolate tile cache', () {
     test('re-sends tile bytes after the worker evicts a tile', () async {
       // Capacity 1 forces the worker to evict the first tile as soon as a

@@ -333,6 +333,7 @@ class GeoQuery {
       if (feature.coordinates != null) ...feature.coordinates!,
     ];
     final visitedTiles = <(int x, int y)>{(startX, startY)};
+    final contributingTiles = <(int x, int y)>{(startX, startY)};
     final queue = <((int x, int y), List<(int dx, int dy)>)>[
       ((startX, startY), feature.candidateNeighborOffsets),
     ];
@@ -368,7 +369,8 @@ class GeoQuery {
           );
 
           for (final dto in dtos) {
-            if (dto.coordinates != null) {
+            if (dto.coordinates != null && dto.coordinates!.isNotEmpty) {
+              contributingTiles.add((nx, ny));
               for (final ring in dto.coordinates!) {
                 allRings.add(ring.map((c) => LatLng(c.$1, c.$2)).toList());
               }
@@ -386,6 +388,7 @@ class GeoQuery {
     return feature.copyWith(
       coordinates: allRings,
       touchesTileBoundary: false, // Fully stitched
+      tileCount: contributingTiles.length,
     );
   }
 

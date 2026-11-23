@@ -36,7 +36,7 @@ Add `dart_geoquery` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_geoquery: ^1.0.0
+  dart_geoquery: ^1.1.0
 ```
 
 ---
@@ -72,6 +72,17 @@ void main() async {
     (feature) => (feature.get<num>('area') ?? 0) > 1000,
   );
   print('Large lots: ${largeLots.length}');
+
+  // 4. Cross-tile stitching: join a polygon clipped by tile edges
+  final building = await geo.at(
+    userLocation,
+    layer: 'buildings',
+    stitchBoundaries: true,
+    idKey: 'building_id', // attribute shared by every tile piece
+  );
+  if (building != null && building.tileCount > 1) {
+    print('Joined from ${building.tileCount} tiles');
+  }
 }
 ```
 

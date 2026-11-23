@@ -1,3 +1,7 @@
+## 1.1.0
+
+* Added `GeoFeature.tileCount`: the number of tiles whose geometry contributed to the feature. It defaults to `1` and `stitchFeature` (and `at(..., stitchBoundaries: true)`) sets it to the source tile plus every neighboring tile that returned matching parts, so callers can tell whether a feature was joined from several tile pieces. `touchesTileBoundary` keeps its existing meaning.
+
 ## 1.0.1
 
 * Fixed isolate tile cache desync: after the worker's LRU cache evicted a tile, later queries on that tile silently returned no results. The worker now reports a cache miss and `GeoQuery` reloads the tile bytes and retries once.
