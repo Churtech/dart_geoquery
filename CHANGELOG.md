@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- Re-recorded the README demo GIF (`doc/demo.gif`) on Android to show the 2.5D building extrusion, the new feature panel and the shaded globe. It is now ~650 KB instead of ~5.4 MB.
+
 ## [1.1.0] - 2026-11-23
 
 ### Added
