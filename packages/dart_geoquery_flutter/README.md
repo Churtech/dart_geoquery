@@ -14,6 +14,7 @@ Interactive vector feature selection, spatial querying, and reactive highlightin
 - **Sub-millisecond Warm Hits**: Vector decoding and point-in-polygon queries execute on a long-lived background isolate with an in-memory LRU cache.
 - **Cross-Tile Geometry Stitching**: Polygons spanning across tile boundaries (including diagonals) are automatically stitched and clipped cleanly.
 - **Zero Base Map Re-renders**: Renders only the active selection highlight using `PolygonLayer`, leaving your base map tiles completely undisturbed.
+- **2.5D Extrusion**: Optionally raise selected buildings by their height with shaded walls and a roof derived from the selection style.
 - **Debounced Taps**: Built-in debounce mechanism prevents race conditions on rapid taps.
 
 ---
@@ -27,7 +28,7 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_map: ^8.0.0
-  dart_geoquery_flutter: ^1.0.0
+  dart_geoquery_flutter: ^1.1.0
 ```
 
 ---
@@ -124,6 +125,25 @@ class _InteractiveMapScreenState extends State<InteractiveMapScreen> {
     );
   }
 }
+```
+
+### 2.5D extrusion
+
+Set `extrude: true` to draw selected features as raised blocks. The height is
+read in meters from `heightKey`; `defaultHeightMeters` is used when the
+property is missing or invalid. The roof uses the style fill and the walls a
+darker, light-shaded variant of it.
+
+```dart
+GeoInteractiveLayer(
+  query: geoQuery,
+  layer: 'buildings',
+  extrude: true,
+  heightKey: 'height',        // default
+  defaultHeightMeters: 10,    // default
+  extrusionPerspective: 0.7,  // vertical squash for the oblique look
+  selectedStyle: (_) => const PolygonStyle(color: Colors.teal),
+)
 ```
 
 ---
