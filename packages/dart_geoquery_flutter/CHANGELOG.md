@@ -1,3 +1,7 @@
+## 1.1.1
+
+* Added the full MIT license text.
+
 ## 1.1.0
 
 * Added opt-in 2.5D extrusion to `GeoInteractiveLayer`: `extrude` (default `false`), `heightKey` (default `'height'`), `defaultHeightMeters` (default `10`) and `extrusionPerspective` (default `0.7`). Selected features are drawn in screen space with a roof shifted up by the feature height, walls painted back to front with directional shading, and even-odd roofs that keep holes open. Roof and wall colors are derived from the feature's `PolygonStyle`. The flat `PolygonLayer` path is unchanged when `extrude` is `false`.
