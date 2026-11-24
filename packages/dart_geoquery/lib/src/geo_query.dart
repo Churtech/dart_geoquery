@@ -5,8 +5,10 @@ import 'package:fixnum/fixnum.dart';
 import 'package:pmtiles/pmtiles.dart';
 import 'package:vector_tile/vector_tile.dart';
 
-import 'isolate/isolate_query_worker.dart';
+import 'isolate/query_worker.dart';
+import 'isolate/query_worker_factory.dart';
 import 'isolate/query_message.dart';
+import 'isolate/tile_query_engine.dart' show queryExtent;
 import 'models/geo_feature.dart';
 import 'models/lat_lng.dart';
 import 'spatial/point_in_polygon.dart';
@@ -17,21 +19,26 @@ class GeoQuery {
   final PmTilesArchive _archive;
   final Map<String, dynamic>? _metadata;
   final Map<String, (int minZoom, int maxZoom)> _layerZoomRanges;
-  final IsolateQueryWorker? _worker;
+  /// Background isolate worker, or an in-process one on web and when
+  /// `useIsolate` is false.
+  final QueryWorker _worker;
   final Set<int> _workerCachedTileIds = <int>{};
 
   GeoQuery._(
     this._archive, {
     this._metadata,
     this._layerZoomRanges = const {},
-    this._worker,
+    required this._worker,
   });
 
   /// Opens a local PMTiles file or remote URL.
   ///
   /// [useIsolate] offloads MVT decoding and spatial operations to a dedicated
   /// background worker isolate, keeping the UI/main thread completely free.
-  /// [cacheCapacity] defines the number of decoded tiles to keep in the isolate's LRU cache.
+  /// [cacheCapacity] defines the number of decoded tiles to keep in the LRU cache.
+  ///
+  /// On web isolates are unavailable: [useIsolate] is ignored and queries run
+  /// on the main thread (with the same LRU tile cache).
   static Future<GeoQuery> open(
     String pathOrUrl, {
     bool useIsolate = true,
@@ -46,6 +53,11 @@ class GeoQuery {
   }
 
   /// Creates a [GeoQuery] instance from in-memory PMTiles bytes.
+  ///
+  /// See [open] for [useIsolate] and [cacheCapacity].
+  ///
+  /// On web isolates are unavailable: [useIsolate] is ignored and queries run
+  /// on the main thread (with the same LRU tile cache).
   static Future<GeoQuery> fromBytes(
     Uint8List bytes, {
     bool useIsolate = true,
@@ -60,6 +72,11 @@ class GeoQuery {
   }
 
   /// Creates a [GeoQuery] instance from an existing [PmTilesArchive].
+  ///
+  /// See [open] for [useIsolate] and [cacheCapacity].
+  ///
+  /// On web isolates are unavailable: [useIsolate] is ignored and queries run
+  /// on the main thread (with the same LRU tile cache).
   static Future<GeoQuery> fromArchive(
     PmTilesArchive archive, {
     bool useIsolate = true,
@@ -93,10 +110,12 @@ class GeoQuery {
       // Non-fatal; falls back to archive header zooms
     }
 
-    IsolateQueryWorker? worker;
+    QueryWorker? worker;
     if (useIsolate) {
-      worker = await IsolateQueryWorker.spawn(cacheCapacity: cacheCapacity);
+      // Resolves to null on web, where isolates are unsupported.
+      worker = await spawnQueryWorker(cacheCapacity: cacheCapacity);
     }
+    worker ??= InProcessQueryWorker(cacheCapacity: cacheCapacity);
 
     return GeoQuery._(
       archive,
@@ -161,154 +180,56 @@ class GeoQuery {
     final (tileX, tileY) = TileMath.latLngToTile(point, targetZoom);
     final tileId = ZXY(targetZoom, tileX, tileY).toTileId();
 
-    const defaultExtent = 4096;
     final (localX, localY) = TileMath.latLngToTileCoordinates(
       point: point,
       zoom: targetZoom,
-      extent: defaultExtent,
+      extent: queryExtent,
     );
 
-    // If long-lived isolate worker is enabled, offload decoding & PIP
-    if (_worker != null) {
-      final worker = _worker;
-      late final List<GeoFeatureDto> dtos;
-      try {
-        dtos = await _runOnWorker(
-          tileId,
-          (tileBytes) => worker.queryPoint(
-            tileId: tileId,
-            tileX: tileX,
-            tileY: tileY,
-            zoom: targetZoom,
-            localX: localX,
-            localY: localY,
-            layer: layer,
-            tileBytes: tileBytes,
-          ),
-        );
-      } catch (_) {
-        return const [];
-      }
-
-      return dtos.map((d) {
-        final rings = d.coordinates
-            ?.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList())
-            .toList();
-
-        final multiRings = d.multiCoordinates
-            ?.map((part) =>
-                part.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList()).toList())
-            .toList();
-
-        return GeoFeature(
-          id: d.id,
-          layer: d.layer,
-          properties: d.properties,
-          geometryType: d.geometryType,
-          coordinates: rings,
-          multiCoordinates: multiRings,
-          touchesTileBoundary: d.touchesTileBoundary,
-          candidateNeighborOffsets: d.candidateNeighborOffsets,
-          sourceTile: d.sourceTile,
-        );
-      }).toList();
-    }
-
-    // Direct synchronous fallback (without isolate)
-    late final List<int> bytes;
+    // Decoding & PIP run in the background isolate when available, or on
+    // this isolate through the same engine otherwise.
+    final worker = _worker;
+    late final List<GeoFeatureDto> dtos;
     try {
-      final tile = await _archive.tile(tileId);
-      bytes = tile.bytes();
-      if (bytes.isEmpty) return const [];
-    } on TileNotFoundException {
-      return const [];
+      dtos = await _runOnWorker(
+        tileId,
+        (tileBytes) => worker.queryPoint(
+          tileId: tileId,
+          tileX: tileX,
+          tileY: tileY,
+          zoom: targetZoom,
+          localX: localX,
+          localY: localY,
+          layer: layer,
+          tileBytes: tileBytes,
+        ),
+      );
     } catch (_) {
       return const [];
     }
 
-    final uint8Bytes = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
-    final vectorTile = VectorTile.fromBytes(bytes: uint8Bytes);
-    final matchingFeatures = <GeoFeature>[];
+    return dtos.map((d) {
+      final rings = d.coordinates
+          ?.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList())
+          .toList();
 
-    for (final vLayer in vectorTile.layers) {
-      if (layer != null && vLayer.name != layer) continue;
+      final multiRings = d.multiCoordinates
+          ?.map((part) =>
+              part.map((r) => r.map((c) => LatLng(c.$1, c.$2)).toList()).toList())
+          .toList();
 
-      final (layerLocalX, layerLocalY) = vLayer.extent == defaultExtent
-          ? (localX, localY)
-          : TileMath.latLngToTileCoordinates(
-              point: point,
-              zoom: targetZoom,
-              extent: vLayer.extent,
-            );
-
-      for (final feature in vLayer.features) {
-        if (feature.type != VectorTileGeomType.POLYGON) continue;
-
-        feature.decodeGeometry();
-        final geom = feature.geometry;
-        if (geom == null) continue;
-
-        List<List<LatLng>>? matchedRings;
-        if (geom is GeometryPolygon) {
-          final isInside = PointInPolygon.containsPoint(
-            px: layerLocalX,
-            py: layerLocalY,
-            rings: geom.coordinates,
-          );
-          if (isInside) {
-            matchedRings = geom.coordinates
-                .map((r) => r
-                    .map((pt) => TileMath.tileCoordinatesToLatLng(
-                          tileX: tileX,
-                          tileY: tileY,
-                          zoom: targetZoom,
-                          localX: pt[0],
-                          localY: pt[1],
-                          extent: vLayer.extent,
-                        ))
-                    .toList())
-                .toList();
-          }
-        } else if (geom is GeometryMultiPolygon && geom.coordinates != null) {
-          for (final poly in geom.coordinates!) {
-            final isInside = PointInPolygon.containsPoint(
-              px: layerLocalX,
-              py: layerLocalY,
-              rings: poly,
-            );
-            if (isInside) {
-              matchedRings = poly
-                  .map((r) => r
-                      .map((pt) => TileMath.tileCoordinatesToLatLng(
-                            tileX: tileX,
-                            tileY: tileY,
-                            zoom: targetZoom,
-                            localX: pt[0],
-                            localY: pt[1],
-                            extent: vLayer.extent,
-                          ))
-                      .toList())
-                  .toList();
-              break;
-            }
-          }
-        }
-
-        if (matchedRings != null) {
-          matchingFeatures.add(_toGeoFeature(
-            feature,
-            vLayer.name,
-            tileX,
-            tileY,
-            targetZoom,
-            vLayer.extent,
-            coordinates: matchedRings,
-          ));
-        }
-      }
-    }
-
-    return matchingFeatures;
+      return GeoFeature(
+        id: d.id,
+        layer: d.layer,
+        properties: d.properties,
+        geometryType: d.geometryType,
+        coordinates: rings,
+        multiCoordinates: multiRings,
+        touchesTileBoundary: d.touchesTileBoundary,
+        candidateNeighborOffsets: d.candidateNeighborOffsets,
+        sourceTile: d.sourceTile,
+      );
+    }).toList();
   }
 
   /// Stitches geometries across tile borders by querying only the candidate
@@ -353,33 +274,31 @@ class GeoQuery {
         final neighborTileId = ZXY(zoom, nx, ny).toTileId();
 
         final worker = _worker;
-        if (worker != null) {
-          final dtos = await _runOnWorker(
-            neighborTileId,
-            (tileBytes) => worker.fetchFeatureById(
-              tileId: neighborTileId,
-              tileX: nx,
-              tileY: ny,
-              zoom: zoom,
-              layer: feature.layer,
-              idKey: idKey,
-              idValue: idValue,
-              tileBytes: tileBytes,
-            ),
-          );
+        final dtos = await _runOnWorker(
+          neighborTileId,
+          (tileBytes) => worker.fetchFeatureById(
+            tileId: neighborTileId,
+            tileX: nx,
+            tileY: ny,
+            zoom: zoom,
+            layer: feature.layer,
+            idKey: idKey,
+            idValue: idValue,
+            tileBytes: tileBytes,
+          ),
+        );
 
-          for (final dto in dtos) {
-            if (dto.coordinates != null && dto.coordinates!.isNotEmpty) {
-              contributingTiles.add((nx, ny));
-              for (final ring in dto.coordinates!) {
-                allRings.add(ring.map((c) => LatLng(c.$1, c.$2)).toList());
-              }
+        for (final dto in dtos) {
+          if (dto.coordinates != null && dto.coordinates!.isNotEmpty) {
+            contributingTiles.add((nx, ny));
+            for (final ring in dto.coordinates!) {
+              allRings.add(ring.map((c) => LatLng(c.$1, c.$2)).toList());
             }
-            if (dto.touchesTileBoundary &&
-                visitedTiles.length < maxDepth &&
-                dto.candidateNeighborOffsets.isNotEmpty) {
-              queue.add(((nx, ny), dto.candidateNeighborOffsets));
-            }
+          }
+          if (dto.touchesTileBoundary &&
+              visitedTiles.length < maxDepth &&
+              dto.candidateNeighborOffsets.isNotEmpty) {
+            queue.add(((nx, ny), dto.candidateNeighborOffsets));
           }
         }
       }
@@ -510,7 +429,7 @@ class GeoQuery {
 
   /// Closes the background isolate and releases resources.
   void close() {
-    _worker?.close();
+    _worker.close();
   }
 
   /// Sends a request to the worker, attaching tile bytes only when the worker

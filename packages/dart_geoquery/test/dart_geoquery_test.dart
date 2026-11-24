@@ -471,6 +471,30 @@ void main() {
           greaterThan(raw.coordinates!.length));
     });
 
+    test('stitches without an isolate worker (web / useIsolate: false)',
+        () async {
+      final query =
+          await GeoQuery.open('../../bogota.pmtiles', useIsolate: false);
+      addTearDown(query.close);
+
+      // Same scenario as the isolate test above, decoded on this isolate.
+      const point = LatLng(4.6635, -74.04788156);
+      final raw = await query.at(point, layer: 'buildings');
+      expect(raw, isNotNull);
+      expect(raw!.touchesTileBoundary, isTrue);
+
+      final stitched = await query.at(
+        point,
+        layer: 'buildings',
+        stitchBoundaries: true,
+        idKey: 'height',
+      );
+      expect(stitched, isNotNull);
+      expect(stitched!.tileCount, greaterThan(1));
+      expect(stitched.coordinates!.length,
+          greaterThan(raw.coordinates!.length));
+    });
+
     test('self-contained building keeps tileCount == 1 when stitching',
         () async {
       final query = await GeoQuery.open('../../bogota.pmtiles', useIsolate: true);

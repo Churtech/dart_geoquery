@@ -1,3 +1,10 @@
+## 1.2.0
+
+* Web support: the library no longer imports `dart:isolate` unconditionally. The background worker is created through a conditional import; on web `useIsolate` is ignored and queries run on the main thread with the same LRU tile cache. The package now supports all six platforms.
+* Boundary stitching (`stitchFeature`, `at(..., stitchBoundaries: true)`) now also works without an isolate (web and `useIsolate: false`). Previously the in-process path neither flagged boundary features nor fetched neighbor tiles.
+* Internal: tile decoding and matching moved into a platform-neutral `TileQueryEngine` shared by the isolate worker and the in-process path, so both return identical results (including tile-edge clipping of projected rings).
+* Added the full MIT license text.
+
 ## 1.1.0
 
 * Added `GeoFeature.tileCount`: the number of tiles whose geometry contributed to the feature. It defaults to `1` and `stitchFeature` (and `at(..., stitchBoundaries: true)`) sets it to the source tile plus every neighboring tile that returned matching parts, so callers can tell whether a feature was joined from several tile pieces. `touchesTileBoundary` keeps its existing meaning.

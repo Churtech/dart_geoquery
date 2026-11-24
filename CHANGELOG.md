@@ -7,10 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [1.2.0] - 2026-11-23
+
+### Added
+
+#### `dart_geoquery` (v1.2.0)
+- Web support: the isolate worker is selected through a conditional import, so the library compiles for web (dart2js and dart2wasm). On web `useIsolate` is ignored and queries run on the main thread.
+- Boundary stitching now works without an isolate (web and `useIsolate: false`).
+
+#### Licensing
+- Added full MIT license text (root, `dart_geoquery`, `dart_geoquery_flutter`).
 
 ### Changed
 
+#### `dart_geoquery` (v1.2.0)
+- Tile decoding and matching are shared by the isolate worker and the in-process path through a platform-neutral `TileQueryEngine`, so both return identical results.
+
+#### `dart_geoquery_flutter` (v1.1.1)
+- Documentation-only release with the full MIT license text; still depends on `dart_geoquery: ^1.1.0`.
+
+#### Repository
 - Re-recorded the README demo GIF (`doc/demo.gif`) on Android to show the 2.5D building extrusion, the new feature panel and the shaded globe. It is now ~650 KB instead of ~5.4 MB.
 
 ## [1.1.0] - 2026-11-23

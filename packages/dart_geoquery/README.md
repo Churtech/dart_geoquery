@@ -22,6 +22,7 @@ In Flutter and Dart, map libraries (`google_maps_flutter`, `mapbox_maps_flutter`
 ## ✨ Features
 
 - **Pure Dart**: Zero Flutter or C++ dependencies. Runs anywhere Dart runs (Flutter, background Isolates, Dart CLI, or backend servers).
+- **All Platforms, Including Web**: Android, iOS, macOS, Windows, Linux and web. On web isolates are unavailable, so `useIsolate` is ignored and queries run on the main thread.
 - **$O(1)$ Direct Tile Seeking**: Uses Web Mercator projection arithmetic and Hilbert curve indexing to jump directly to the exact tile bytes without loading the archive into memory.
 - **Fast Point-in-Polygon (PIP)**: Accurate Jordan curve ray-casting in local tile space with automatic axis-aligned bounding box fast rejection and interior hole handling.
 - **Multi-Polygon Support**: Transparently evaluates complex multi-polygon geometries.
@@ -36,7 +37,7 @@ Add `dart_geoquery` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_geoquery: ^1.1.0
+  dart_geoquery: ^1.2.0
 ```
 
 ---
